@@ -1,9 +1,9 @@
-// LiveCode VS Code extension.
+// Hivecode VS Code extension.
 //
 // Commands:
-//   LiveCode: Host a Session  -> share THIS folder, copy a join link to send
-//   LiveCode: Join a Session  -> paste a friend's link, sync THIS folder
-//   LiveCode: Leave Session
+//   Hivecode: Host a Session  -> share THIS folder, copy a join link to send
+//   Hivecode: Join a Session  -> paste a friend's link, sync THIS folder
+//   Hivecode: Leave Session
 //
 // Works in VS Code and any fork (Antigravity, Cursor, Windsurf). It syncs the
 // open folder through the relay; the editor auto-reloads changed files, so it
@@ -29,32 +29,32 @@ function activate(context) {
   status.show()
   context.subscriptions.push(
     status,
-    vscode.commands.registerCommand('livecode.host', hostSession),
-    vscode.commands.registerCommand('livecode.join', joinSession),
-    vscode.commands.registerCommand('livecode.leave', leaveSession)
+    vscode.commands.registerCommand('hivecode.host', hostSession),
+    vscode.commands.registerCommand('hivecode.join', joinSession),
+    vscode.commands.registerCommand('hivecode.leave', leaveSession)
   )
 }
 
 function setStatus(state, people) {
   if (state === 'off') {
-    status.text = '$(broadcast) LiveCode'
-    status.tooltip = 'Click to host a LiveCode session'
-    status.command = 'livecode.host'
+    status.text = '$(broadcast) Hivecode'
+    status.tooltip = 'Click to host a Hivecode session'
+    status.command = 'hivecode.host'
   } else {
-    status.text = `$(broadcast) LiveCode: ${people || 1} online`
-    status.tooltip = 'In a LiveCode session. Click to leave.'
-    status.command = 'livecode.leave'
+    status.text = `$(broadcast) Hivecode: ${people || 1} online`
+    status.tooltip = 'In a Hivecode session. Click to leave.'
+    status.command = 'hivecode.leave'
   }
 }
 
 function relayUrl() {
-  return vscode.workspace.getConfiguration('livecode').get('relayUrl')
+  return vscode.workspace.getConfiguration('hivecode').get('relayUrl')
 }
 
 function workspaceRoot() {
   const folders = vscode.workspace.workspaceFolders
   if (!folders || !folders.length) {
-    vscode.window.showErrorMessage('LiveCode: open a folder first (File > Open Folder).')
+    vscode.window.showErrorMessage('Hivecode: open a folder first (File > Open Folder).')
     return null
   }
   return folders[0].uri.fsPath
@@ -68,7 +68,7 @@ async function hostSession() {
   const link = `${relayUrl()}|${room}`
   await vscode.env.clipboard.writeText(link)
   const pick = await vscode.window.showInformationMessage(
-    'LiveCode session started! Join link copied — send it to your friend.',
+    'Hivecode session started! Join link copied — send it to your friend.',
     'Show link'
   )
   if (pick === 'Show link') vscode.window.showInformationMessage(link)
@@ -78,7 +78,7 @@ async function joinSession() {
   const root = workspaceRoot()
   if (!root || session) return
   const link = await vscode.window.showInputBox({
-    prompt: 'Paste the LiveCode join link your friend sent you',
+    prompt: 'Paste the Hivecode join link your friend sent you',
     placeHolder: 'wss://...onrender.com|room-xxxxxxxx',
   })
   if (!link) return
@@ -93,7 +93,7 @@ function leaveSession() {
   try { session.doc.destroy() } catch {}
   session = null
   setStatus('off')
-  vscode.window.showInformationMessage('LiveCode: left the session.')
+  vscode.window.showInformationMessage('Hivecode: left the session.')
 }
 
 // --- the sync engine (whole-folder, disk-level, no echo loop) ---

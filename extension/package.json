@@ -1,31 +1,42 @@
 {
-  "name": "livecode",
-  "displayName": "LiveCode — live multiplayer coding",
+  "name": "hivecode",
+  "displayName": "Hivecode — live multiplayer coding",
   "description": "Edit a project together live with teammates and AI agents. No git push/pull.",
   "version": "0.1.0",
-  "publisher": "livecode",
+  "publisher": "hivecode",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": ["Other"],
+  "keywords": ["collaboration", "live share", "ai", "pair programming", "realtime", "multiplayer"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GSK7024/livecode"
+  },
   "main": "./extension.js",
   "activationEvents": [],
   "contributes": {
     "commands": [
-      { "command": "livecode.host", "title": "LiveCode: Host a Session" },
-      { "command": "livecode.join", "title": "LiveCode: Join a Session" },
-      { "command": "livecode.leave", "title": "LiveCode: Leave Session" }
+      { "command": "hivecode.host", "title": "Hivecode: Host a Session" },
+      { "command": "hivecode.join", "title": "Hivecode: Join a Session" },
+      { "command": "hivecode.leave", "title": "Hivecode: Leave Session" }
     ],
     "configuration": {
-      "title": "LiveCode",
+      "title": "Hivecode",
       "properties": {
-        "livecode.relayUrl": {
+        "hivecode.relayUrl": {
           "type": "string",
           "default": "wss://livecode-xoss.onrender.com",
-          "description": "The LiveCode relay server URL."
+          "description": "The Hivecode relay server URL."
         }
       }
     }
+  },
+  "scripts": {
+    "package": "vsce package",
+    "publish:vsce": "vsce publish",
+    "publish:ovsx": "ovsx publish"
   },
   "dependencies": {
     "yjs": "^13.6.18",
