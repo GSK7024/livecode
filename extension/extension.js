@@ -1,13 +1,13 @@
 // Hivecode VS Code extension.
 //
-// Commands:
+// Sidebar panel (activity-bar icon) with Host / Join / Leave buttons, the live
+// member list, and an activity log. Commands also available via Ctrl+Shift+P:
 //   Hivecode: Host a Session  -> share THIS folder, copy a join link to send
 //   Hivecode: Join a Session  -> paste a friend's link, sync THIS folder
 //   Hivecode: Leave Session
 //
 // Works in VS Code and any fork (Antigravity, Cursor, Windsurf). It syncs the
-// open folder through the relay; the editor auto-reloads changed files, so it
-// feels live. (Buffer-level cursors are the next version.)
+// open folder through the relay; the editor auto-reloads changed files.
 
 const vscode = require('vscode')
 const fs = require('fs')
@@ -20,17 +20,23 @@ const { WebSocket } = require('ws')
 const IGNORE = new Set(['node_modules', '.git', '.vscode'])
 const MAX_BYTES = 1_000_000
 
-let session = null      // { doc, provider, root, scanTimer }
-let status
+let session = null     // { doc, provider, root, scanTimer, room, relay }
+let status             // status-bar item
+let panel = null       // the sidebar webview provider
+const activity = []    // recent activity log lines (newest first)
 
 function activate(context) {
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100)
   setStatus('off')
   status.show()
+
+  panel = new HivecodeViewProvider()
+
   context.subscriptions.push(
     status,
+    vscode.window.registerWebviewViewProvider('hivecode.panel', panel),
     vscode.commands.registerCommand('hivecode.host', hostSession),
-    vscode.commands.registerCommand('hivecode.join', joinSession),
+    vscode.commands.registerCommand('hivecode.join', joinSessionPrompt),
     vscode.commands.registerCommand('hivecode.leave', leaveSession)
   )
 }
@@ -60,30 +66,62 @@ function workspaceRoot() {
   return folders[0].uri.fsPath
 }
 
+// --- activity log + state broadcast to the panel ---
+function logActivity(msg) {
+  const t = new Date().toLocaleTimeString()
+  activity.unshift(`${t}  ${msg}`)
+  if (activity.length > 100) activity.pop()
+  pushState()
+}
+
+function membersList() {
+  if (!session) return []
+  return [...session.provider.awareness.getStates().values()]
+    .map((s) => s.user)
+    .filter(Boolean)
+    .map((u) => ({ name: u.name, kind: u.kind || 'human' }))
+}
+
+function pushState() {
+  const members = membersList()
+  setStatus(session ? 'on' : 'off', members.length)
+  if (!panel) return
+  panel.post({
+    type: 'state',
+    connected: !!session,
+    room: session ? session.room : null,
+    link: session ? `${session.relay}|${session.room}` : null,
+    members,
+    activity,
+  })
+}
+
+// --- session actions ---
 async function hostSession() {
   const root = workspaceRoot()
   if (!root || session) return
   const room = 'room-' + crypto.randomBytes(13).toString('base64url')
-  start(root, room)
-  const link = `${relayUrl()}|${room}`
-  await vscode.env.clipboard.writeText(link)
-  const pick = await vscode.window.showInformationMessage(
-    'Hivecode session started! Join link copied — send it to your friend.',
-    'Show link'
-  )
-  if (pick === 'Show link') vscode.window.showInformationMessage(link)
+  const relay = relayUrl()
+  start(root, room, relay)
+  await vscode.env.clipboard.writeText(`${relay}|${room}`)
+  logActivity('Hosting — join link copied to clipboard')
+  vscode.window.showInformationMessage('Hivecode: hosting. Join link copied — send it to your friend.')
 }
 
-async function joinSession() {
-  const root = workspaceRoot()
-  if (!root || session) return
+async function joinSessionPrompt() {
   const link = await vscode.window.showInputBox({
     prompt: 'Paste the Hivecode join link your friend sent you',
-    placeHolder: 'wss://...onrender.com|room-xxxxxxxx',
+    placeHolder: 'wss://...|room-xxxxxxxx',
   })
-  if (!link) return
+  if (link) joinSessionWithLink(link)
+}
+
+function joinSessionWithLink(link) {
+  const root = workspaceRoot()
+  if (!root || session || !link) return
   const [relay, room] = link.includes('|') ? link.split('|') : [relayUrl(), link]
   start(root, room.trim(), relay.trim())
+  logActivity(`Joining room ${room.trim()}`)
 }
 
 function leaveSession() {
@@ -92,21 +130,22 @@ function leaveSession() {
   try { session.provider.destroy() } catch {}
   try { session.doc.destroy() } catch {}
   session = null
-  setStatus('off')
-  vscode.window.showInformationMessage('Hivecode: left the session.')
+  logActivity('Left the session')
+  pushState()
 }
 
-// --- the sync engine (whole-folder, disk-level, no echo loop) ---
+// --- the sync engine (whole-folder, disk-level, mtime-optimized) ---
 function start(root, room, relay) {
   const doc = new Y.Doc()
   const files = doc.getMap('files')
-  const provider = new WebsocketProvider(relay || relayUrl(), room, doc, { WebSocketPolyfill: WebSocket })
+  const useRelay = relay || relayUrl()
+  const provider = new WebsocketProvider(useRelay, room, doc, { WebSocketPolyfill: WebSocket })
   const me = vscode.env.machineId.slice(0, 6)
   provider.awareness.setLocalStateField('user', { name: me, kind: 'human' })
   const known = new Set()
-  const mtimes = new Map() // path -> mtimeMs, so we skip re-reading unchanged files
+  const mtimes = new Map()
+  const seenMembers = new Set()
 
-  // make collaboration smooth: auto-save so edits push quickly
   vscode.workspace.getConfiguration('files').update('autoSave', 'afterDelay', vscode.ConfigurationTarget.Workspace)
 
   const rel = (full) => path.relative(root, full).split(path.sep).join('/')
@@ -180,19 +219,23 @@ function start(root, room, relay) {
     for (const ev of events) {
       if (ev.target === files) {
         ev.changes.keys.forEach((change, key) => {
-          if (change.action === 'delete') { try { fs.rmSync(path.join(root, key)) } catch {}; known.delete(key) }
-          else { const yt = files.get(key); if (yt) writeToDisk(key, yt.toString()) }
+          if (change.action === 'delete') { try { fs.rmSync(path.join(root, key)) } catch {}; known.delete(key); logActivity(`deleted ${key}`) }
+          else { const yt = files.get(key); if (yt) { writeToDisk(key, yt.toString()); logActivity(`received ${key}`) } }
         })
       } else {
         for (const [key, yt] of files.entries()) {
-          if (yt === ev.target) { writeToDisk(key, yt.toString()); break }
+          if (yt === ev.target) { writeToDisk(key, yt.toString()); logActivity(`updated ${key}`); break }
         }
       }
     }
   })
 
   provider.awareness.on('change', () => {
-    setStatus('on', provider.awareness.getStates().size)
+    for (const s of provider.awareness.getStates().values()) {
+      const n = s.user && s.user.name
+      if (n && !seenMembers.has(n)) { seenMembers.add(n); logActivity(`${n} joined`) }
+    }
+    pushState()
   })
 
   provider.on('sync', (s) => {
@@ -203,12 +246,105 @@ function start(root, room, relay) {
       else known.add(key)
     }
     scan()
-    const timer = setInterval(scan, 400)
-    session.scanTimer = timer
+    session.scanTimer = setInterval(scan, 400)
+    logActivity('Synced')
   })
 
-  session = { doc, provider, root, scanTimer: null }
-  setStatus('on', 1)
+  session = { doc, provider, root, scanTimer: null, room, relay: useRelay }
+  pushState()
+}
+
+// --- the sidebar panel ---
+class HivecodeViewProvider {
+  resolveWebviewView(view) {
+    this.view = view
+    view.webview.options = { enableScripts: true }
+    view.webview.html = getHtml()
+    view.webview.onDidReceiveMessage((m) => {
+      if (m.type === 'host') hostSession()
+      else if (m.type === 'join') joinSessionWithLink(m.link || '')
+      else if (m.type === 'leave') leaveSession()
+      else if (m.type === 'copy') {
+        vscode.env.clipboard.writeText(m.text || '')
+        vscode.window.showInformationMessage('Hivecode: join link copied.')
+      } else if (m.type === 'ready') pushState()
+    })
+    pushState()
+  }
+  post(msg) { if (this.view) this.view.webview.postMessage(msg) }
+}
+
+function getHtml() {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 10px; font-size: 13px; }
+  h3 { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; opacity: .7; letter-spacing: .5px; }
+  button { width: 100%; padding: 7px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer;
+           background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  button:hover { opacity: .9; }
+  input { width: 100%; box-sizing: border-box; padding: 6px; margin: 4px 0;
+          background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+          border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; }
+  .status { padding: 6px 8px; border-radius: 4px; background: var(--vscode-editor-inactiveSelectionBackground); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .on { background:#3fb950; } .off { background:#888; }
+  .member { padding: 3px 0; }
+  .badge { font-size: 10px; padding: 1px 5px; border-radius: 8px; margin-left: 6px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+  .link { word-break: break-all; font-size: 11px; padding: 6px; background: var(--vscode-textBlockQuote-background); border-radius: 4px; }
+  .log { font-size: 11px; line-height: 1.5; max-height: 220px; overflow:auto; opacity:.85; }
+  .log div { padding: 1px 0; border-bottom: 1px solid var(--vscode-editorWidget-border, transparent); }
+  .hidden { display: none; }
+</style></head><body>
+  <div class="status"><span id="dot" class="dot off"></span><span id="statustext">Not in a session</span></div>
+
+  <div id="offControls">
+    <button id="host">Host a Session</button>
+    <h3>Join a session</h3>
+    <input id="link" placeholder="paste join link here" />
+    <button id="join" class="secondary">Join</button>
+  </div>
+
+  <div id="onControls" class="hidden">
+    <h3>Your join link</h3>
+    <div id="hostlink" class="link"></div>
+    <button id="copy" class="secondary">Copy join link</button>
+    <button id="leave">Leave Session</button>
+  </div>
+
+  <h3>Members (<span id="count">0</span>)</h3>
+  <div id="members"></div>
+
+  <h3>Activity</h3>
+  <div id="log" class="log"></div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const $ = (id) => document.getElementById(id);
+  const send = (type, extra) => vscode.postMessage(Object.assign({ type }, extra || {}));
+  $('host').onclick = () => send('host');
+  $('leave').onclick = () => send('leave');
+  $('join').onclick = () => send('join', { link: $('link').value });
+  $('copy').onclick = () => send('copy', { text: $('hostlink').textContent });
+
+  window.addEventListener('message', (e) => {
+    const s = e.data;
+    if (!s || s.type !== 'state') return;
+    $('dot').className = 'dot ' + (s.connected ? 'on' : 'off');
+    $('statustext').textContent = s.connected ? ('In room ' + (s.room || '')) : 'Not in a session';
+    $('offControls').className = s.connected ? 'hidden' : '';
+    $('onControls').className = s.connected ? '' : 'hidden';
+    $('hostlink').textContent = s.link || '';
+    $('count').textContent = (s.members || []).length;
+    $('members').innerHTML = (s.members || []).map((m) =>
+      '<div class="member">' + escapeHtml(m.name) + '<span class="badge">' + (m.kind === 'ai' ? 'AI' : 'human') + '</span></div>'
+    ).join('') || '<div style="opacity:.5">no one yet</div>';
+    $('log').innerHTML = (s.activity || []).map((l) => '<div>' + escapeHtml(l) + '</div>').join('');
+  });
+  function escapeHtml(x){ return String(x).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  send('ready');
+</script>
+</body></html>`
 }
 
 function deactivate() { leaveSession() }
