@@ -7,6 +7,7 @@ node_modules/
 projA/
 projB/
 workspace/
+aiproj/
 
 # build artifacts
 *.vsix
