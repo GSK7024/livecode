@@ -2,7 +2,7 @@
   "name": "hivecode",
   "displayName": "Hivecode — live multiplayer coding",
   "description": "Edit a project together live with teammates and AI agents. No git push/pull.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "hivecode",
   "license": "MIT",
   "engines": {
@@ -39,6 +39,17 @@
           "type": "string",
           "default": "wss://livecode-xoss.onrender.com",
           "description": "The Hivecode relay server URL."
+        },
+        "hivecode.displayName": {
+          "type": "string",
+          "default": "",
+          "description": "Your name shown to others in the session. Leave blank for an auto-generated id."
+        },
+        "hivecode.participantKind": {
+          "type": "string",
+          "enum": ["human", "ai"],
+          "default": "human",
+          "description": "How this window appears in the member list. Set to 'ai' for a window driven by an AI agent."
         }
       }
     }
