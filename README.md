@@ -5,6 +5,18 @@ project live, across the internet — no git push/pull in the loop. Your IDE
 doesn't matter (it syncs files on disk, so VS Code, Antigravity, and Cursor all
 work). The relay is one server hosting unlimited isolated, private rooms.
 
+## Install the editor extension
+
+Download and install in VS Code / Antigravity / Cursor (Extensions panel →
+`...` → **Install from VSIX**):
+
+```
+https://github.com/GSK7024/livecode/raw/main/extension/hivecode.vsix
+```
+
+Then click the **Hivecode** icon in the activity bar — Host / Join / Leave,
+live members, and an activity log are all in the side panel.
+
 ## Why
 
 When you and a teammate work remotely while AI agents move fast, git is too
