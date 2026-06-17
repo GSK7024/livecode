@@ -140,8 +140,13 @@ function start(root, room, relay) {
   const files = doc.getMap('files')
   const useRelay = relay || relayUrl()
   const provider = new WebsocketProvider(useRelay, room, doc, { WebSocketPolyfill: WebSocket })
-  const me = vscode.env.machineId.slice(0, 6)
-  provider.awareness.setLocalStateField('user', { name: me, kind: 'human' })
+  // Unique per window: doc.clientID is distinct even for two windows on one
+  // machine (machineId was identical → both showed the same id). A configured
+  // displayName wins so members read as "Jeevan"/"Friend" instead of an id.
+  const cfg = vscode.workspace.getConfiguration('hivecode')
+  const me = (cfg.get('displayName') || '').trim() || `user-${String(doc.clientID).slice(-4)}`
+  const kind = cfg.get('participantKind') === 'ai' ? 'ai' : 'human'
+  provider.awareness.setLocalStateField('user', { name: me, kind })
   const known = new Set()
   const mtimes = new Map()
   const seenMembers = new Set()
