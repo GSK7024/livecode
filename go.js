@@ -37,15 +37,19 @@ function shutdown() {
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 
-// Wait until a child prints text matching `re`, then resolve with the match.
-function waitFor(child, re, label) {
+// Wait until a child prints text matching `re`. Resolves with the match, or
+// null if the child dies / times out (so callers can show a helpful message
+// instead of hanging forever).
+function waitFor(child, re, label, timeoutMs) {
   return new Promise((resolve) => {
-    const onData = (d) => {
-      const m = d.toString().match(re)
-      if (m) { resolve(m); }
-    }
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    const onData = (d) => { const m = d.toString().match(re); if (m) finish(m) }
     child.stdout?.on('data', onData)
     child.stderr?.on('data', onData)
+    child.on('error', () => finish(null))
+    child.on('exit', () => finish(null))
+    if (timeoutMs) setTimeout(() => finish(null), timeoutMs)
     if (label) console.log(`...waiting for ${label}`)
   })
 }
@@ -90,9 +94,17 @@ async function host() {
   } else {
     // Fallback: run a relay locally and expose it with a tunnel.
     const relay = run('node', ['server.js'], 'relay')
-    await waitFor(relay, /listening on/, 'relay to start')
+    await waitFor(relay, /listening on/, 'relay to start', 15000)
     const tunnel = run('cloudflared', ['tunnel', '--url', 'http://localhost:1234'], 'tunnel')
-    const m = await waitFor(tunnel, /https:\/\/[a-z0-9-]+\.trycloudflare\.com/, 'public tunnel URL')
+    const m = await waitFor(tunnel, /https:\/\/[a-z0-9-]+\.trycloudflare\.com/, 'public tunnel URL', 25000)
+    if (!m) {
+      console.error('\n[go] Could not get a public tunnel URL.')
+      console.error('[go] Is cloudflared installed?  Install: winget install --id Cloudflare.cloudflared')
+      console.error('[go] Or use your hosted relay instead (no tunnel needed):')
+      console.error('[go]   node go.js host <dir> <name> --relay wss://livecode-xoss.onrender.com')
+      shutdown()
+      return
+    }
     WSS = m[0].replace('https://', 'wss://')
   }
 
