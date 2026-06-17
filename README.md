@@ -1,4 +1,4 @@
-# LiveCode
+# Hivecode
 
 **Multiplayer for AI coding.** Multiple people *and* AI agents edit the same
 project live, across the internet — no git push/pull in the loop. Your IDE
@@ -8,7 +8,7 @@ work). The relay is one server hosting unlimited isolated, private rooms.
 ## Why
 
 When you and a teammate work remotely while AI agents move fast, git is too
-slow: commit → push → wait → pull → merge. LiveCode replaces that with **sync** —
+slow: commit → push → wait → pull → merge. Hivecode replaces that with **sync** —
 everyone (humans and AI) sees changes the instant they happen, like Figma or
 Google Docs, but for your whole project folder.
 
