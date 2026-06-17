@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "relay": "node server.js",
-    "client": "node client.js"
+    "client": "node client.js",
+    "test": "node test.js"
   },
   "engines": {
     "node": ">=18"
