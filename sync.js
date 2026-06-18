@@ -26,11 +26,12 @@ const IGNORE = new Set(['node_modules', '.git'])
 const MAX_BYTES = 1_000_000
 const BOARD_FILE = 'HIVE_BOARD.md' // generated locally from `board`; never synced as a file
 const CHAT_FILE = 'HIVE_CHAT.md'   // generated locally from `chat`; the agents' conversation
+const TASKS_FILE = 'HIVE_TASKS.md' // generated locally from `tasks`; directed work + approvals
 const CONFIG_FILE = '.hive.json'   // local rendezvous config (room id); not synced
 const RULES_FILE = 'HIVE_RULES.md' // the law every participant follows; written into every room
 // Generated/coordination files are rendered locally from CRDT state — never
 // synced as ordinary files (that would cause echo loops / conflicts).
-const SKIP = new Set([BOARD_FILE, CHAT_FILE, CONFIG_FILE, RULES_FILE])
+const SKIP = new Set([BOARD_FILE, CHAT_FILE, TASKS_FILE, CONFIG_FILE, RULES_FILE])
 
 // The hive's law. Auto-written into every room folder so it is ALWAYS present —
 // no setup, no relying on an agent to remember it. The sync layer enforces the
@@ -73,7 +74,7 @@ another's work. The sync layer enforces the hard parts automatically; you do the
 Read → announce → patch → respect lanes → resolve conflicts → talk.
 `
 
-export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir = '.', name = 'anon', kind = 'human', log = console.log, syncFiles = true }) {
+export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir = '.', name = 'anon', kind = 'human', owner = '', log = console.log, syncFiles = true }) {
   const ROOT = path.resolve(dir)
   fs.mkdirSync(ROOT, { recursive: true })
 
@@ -81,8 +82,11 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   const files = doc.getMap('files') // relPath -> Y.Text
   const board = doc.getMap('board') // relPath -> { by, at, churn, symbols }
   const chat = doc.getArray('chat') // ordered coordination messages { by, kind, at, text }
+  const tasks = doc.getMap('tasks') // id -> { id, to, by, text, status, decidedBy, at } directed work
+  const owners = doc.getMap('owners') // aiName -> ownerHumanName (who may approve its tasks)
   const provider = new WebsocketProvider(relay, room, doc, { WebSocketPolyfill: WebSocket })
-  provider.awareness.setLocalStateField('user', { name, kind }) // identity is implicit in the client
+  provider.awareness.setLocalStateField('user', { name, kind, owner: owner || undefined }) // identity is implicit in the client
+  if (kind === 'ai' && owner) owners.set(name, owner) // record who is allowed to approve my tasks
 
   const known = new Set()
   const mtimes = new Map()
@@ -181,6 +185,44 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   }
   if (syncFiles) chat.observe(() => renderChat())
 
+  // --- directed work + permission ---
+  // A human (or agent) ASSIGNS a task to a participant. If the target is an AI
+  // with a recorded owner, only that owner may APPROVE it; the AI acts only on
+  // 'accepted' tasks. So "tell another AI to do X" works, but only goes ahead
+  // if that AI's owner permits. Nothing is auto-obeyed.
+  const newId = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+  function assign(to, text) {
+    if (!to || !text) return null
+    const id = newId()
+    tasks.set(id, { id, to, by: name, text: String(text), status: 'pending', decidedBy: null, at: fmtTime() })
+    say(`@${to}: ${text}  (task ${id} — pending ${owners.get(to) ? owners.get(to) + "'s" : 'owner'} approval)`)
+    return id
+  }
+  function decide(id, accept, by = name) {
+    const t = tasks.get(id)
+    if (!t) return { error: 'no such task' }
+    const ownerOf = owners.get(t.to)
+    if (ownerOf && by !== ownerOf) return { error: `only ${ownerOf} (owner of ${t.to}) can approve task ${id}` }
+    tasks.set(id, { ...t, status: accept ? 'accepted' : 'denied', decidedBy: by })
+    say(`task ${id} ${accept ? 'APPROVED' : 'denied'} by ${by}: "${t.text}"`)
+    return { ok: true }
+  }
+  function complete(id, note = '') {
+    const t = tasks.get(id); if (!t) return { error: 'no such task' }
+    tasks.set(id, { ...t, status: 'done', decidedBy: t.decidedBy })
+    say(`task ${id} done by ${name}${note ? ': ' + note : ''}`)
+    return { ok: true }
+  }
+  const myTasks = () => [...tasks.values()].filter((t) => t.to === name)
+  function renderTasks() {
+    const all = [...tasks.values()].sort((a, b) => (a.at < b.at ? 1 : -1))
+    const out = ['# Hive Tasks — directed work and approvals.', '# An AI acts on a task only once it is APPROVED by that AI\'s owner.', '']
+    if (!all.length) out.push('(no tasks)')
+    for (const t of all) out.push(`- [${t.status}] ${t.id}  ${t.by} -> ${t.to}: ${t.text}${t.decidedBy ? `  (by ${t.decidedBy})` : ''}`)
+    writeToDisk(TASKS_FILE, out.join('\n') + '\n')
+  }
+  if (syncFiles) tasks.observe(() => renderTasks())
+
   function scan() {
     const diskFulls = walk(ROOT)
     const diskRel = new Set(diskFulls.map(rel))
@@ -230,6 +272,7 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
     for (const [key] of files.entries()) reconcile(key, 'remote')
     if (board.size) renderBoard()
     if (chat.length) renderChat()
+    if (tasks.size) renderTasks()
     scan()
     log(`[${name}] folder sync active on ${ROOT} (room "${room}") as ${kind}. ${files.size} files.`)
     if (!scanTimer) scanTimer = setInterval(scan, 400)
@@ -238,7 +281,11 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   return {
     doc,
     provider,
-    say, // post a coordination message to the room
+    say,                 // post a coordination message
+    assign,              // direct a task at a participant (needs approval if target AI has an owner)
+    decide,              // approve/deny a task (owner only, if set)
+    complete,            // mark a task done
+    myTasks,             // tasks directed at me
     members: () => [...provider.awareness.getStates().values()].map((s) => s.user).filter(Boolean),
     stop: () => { if (scanTimer) clearInterval(scanTimer); try { provider.destroy() } catch {}; try { doc.destroy() } catch {} },
   }

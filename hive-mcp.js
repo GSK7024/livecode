@@ -41,13 +41,13 @@ function resolveRoom(link, dir) {
   return { relay: DEFAULT_RELAY, room: 'room-' + crypto.randomBytes(13).toString('base64url'), mode: 'HOSTED (new room)' }
 }
 
-async function joinRoom({ link = '', dir = './workspace', name = `agent-${crypto.randomBytes(2).toString('hex')}` }) {
+async function joinRoom({ link = '', dir = './workspace', name = `agent-${crypto.randomBytes(2).toString('hex')}`, owner = '' }) {
   if (session) { try { session.hive.stop() } catch {} ; session = null }
   const ROOT = path.resolve(dir)
   fs.mkdirSync(ROOT, { recursive: true })
   const { relay, room, mode } = resolveRoom(link, dir)
   fs.writeFileSync(path.join(ROOT, '.hive.json'), JSON.stringify({ relay, room }, null, 2))
-  const hive = startSync({ relay, room, dir, name, kind: 'ai', log: () => {} })
+  const hive = startSync({ relay, room, dir, name, kind: 'ai', owner, log: () => {} })
   session = { hive, room, relay, dir, name }
   // wait for the first sync so members/board/rules are ready
   await new Promise((resolve) => {
@@ -65,10 +65,21 @@ async function joinRoom({ link = '', dir = './workspace', name = `agent-${crypto
 function requireSession() { if (!session) throw new Error('not in a room — call hive_join first'); return session }
 function chatArray() { return requireSession().hive.doc.getArray('chat').toArray() }
 function boardMap() { const b = requireSession().hive.doc.getMap('board'); return [...b.entries()].map(([file, e]) => ({ file, ...e })) }
+function taskList() { return [...requireSession().hive.doc.getMap('tasks').values()] }
 
 const TOOLS = [
   { name: 'hive_join', description: 'Join (or host) a Hivecode room for a project folder. Joins automatically as an AI participant. If a join link is given, uses it; else reads <dir>/.hive.json; else hosts a new room. Returns the room info and the HIVE_RULES you must follow.',
-    inputSchema: { type: 'object', properties: { link: { type: 'string', description: 'optional join link "wss://relay|room"' }, dir: { type: 'string', description: 'project folder to sync (default ./workspace)' }, name: { type: 'string', description: 'your display name in the room' } } } },
+    inputSchema: { type: 'object', properties: { link: { type: 'string', description: 'optional join link "wss://relay|room"' }, dir: { type: 'string', description: 'project folder to sync (default ./workspace)' }, name: { type: 'string', description: 'your display name in the room' }, owner: { type: 'string', description: 'the human responsible for you — only they may approve tasks directed at you' } } } },
+  { name: 'hive_assign', description: 'Direct a task at another participant by name (e.g. ask another agent to work on a file). If the target is an AI with an owner, it stays PENDING until that owner approves.',
+    inputSchema: { type: 'object', properties: { to: { type: 'string', description: 'participant name to assign to' }, text: { type: 'string', description: 'what to do' } }, required: ['to', 'text'] } },
+  { name: 'hive_read_tasks', description: 'Read tasks. Shows tasks directed at YOU (act only on accepted ones) and all pending tasks awaiting approval.',
+    inputSchema: { type: 'object', properties: {} } },
+  { name: 'hive_approve', description: 'Approve a pending task (you must be the owner of the target AI). The AI may then act on it.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+  { name: 'hive_deny', description: 'Deny a pending task (you must be the owner of the target AI).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+  { name: 'hive_complete', description: 'Mark a task you were doing as done (optionally with a note).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
   { name: 'hive_say', description: 'Post a coordination message to the room chat. Use this to announce what you are about to work on BEFORE editing (e.g. "taking auth.js: adding login").',
     inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'the message' } }, required: ['text'] } },
   { name: 'hive_read_chat', description: 'Read the room conversation. Read this to see what humans and other agents are doing before and while you work.',
@@ -90,6 +101,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'hive_say': { requireSession().hive.say(String(args.text || '')); return text(`sent: ${args.text}`) }
       case 'hive_read_chat': { const n = args.limit || 30; const msgs = chatArray().slice(-n).map((m) => `${m.at} ${m.by}(${m.kind}): ${m.text}`); return text(msgs.join('\n') || '(no messages yet)') }
       case 'hive_read_board': { const b = boardMap(); return text(b.length ? b.map((e) => `${e.at} ${e.by} rewrote ${e.file} (${e.churn}) — touched: ${(e.symbols || []).join(', ')}`).join('\n') : '(no rewrites logged)') }
+      case 'hive_assign': { const id = requireSession().hive.assign(String(args.to || ''), String(args.text || '')); return id ? text(`assigned task ${id} to ${args.to} (pending approval if they have an owner)`) : err('need to and text') }
+      case 'hive_read_tasks': {
+        const all = taskList(); const me = requireSession().name
+        const mine = all.filter((t) => t.to === me)
+        const pending = all.filter((t) => t.status === 'pending')
+        const fmt = (t) => `${t.id} [${t.status}] ${t.by} -> ${t.to}: ${t.text}${t.decidedBy ? ` (by ${t.decidedBy})` : ''}`
+        return text(`TASKS FOR YOU (act only on 'accepted'):\n${mine.map(fmt).join('\n') || '(none)'}\n\nPENDING (awaiting approval):\n${pending.map(fmt).join('\n') || '(none)'}`)
+      }
+      case 'hive_approve': { const r = requireSession().hive.decide(String(args.id), true); return r.ok ? text(`approved ${args.id}`) : err(r.error) }
+      case 'hive_deny': { const r = requireSession().hive.decide(String(args.id), false); return r.ok ? text(`denied ${args.id}`) : err(r.error) }
+      case 'hive_complete': { const r = requireSession().hive.complete(String(args.id), String(args.note || '')); return r.ok ? text(`completed ${args.id}`) : err(r.error) }
       case 'hive_members': { return text(requireSession().hive.members().map((m) => `${m.name} (${m.kind})`).join('\n') || '(none)') }
       case 'hive_status': { const s = requireSession(); return text({ room: s.room, relay: s.relay, dir: s.dir, name: s.name }) }
       case 'hive_leave': { requireSession().hive.stop(); session = null; return text('left the room') }
