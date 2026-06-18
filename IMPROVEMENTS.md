@@ -38,6 +38,21 @@ Work done while you were at lunch. Every change verified before moving on.
 
 ## Also done
 
+- **AUTO-BOARD for rewrites** (`summarizeChange` in core.js; `noteIfRewrite` +
+  `renderBoard` in folder.js AND the extension). Insight (from the user's
+  experience): agents mostly grep-and-PATCH a few lines (the disjoint case that
+  already merges) — the board only matters for the rare WHOLE-FILE REWRITE, and
+  the agent must not be relied on to log it (AIs forget when context is heavy).
+  So the SYNC LAYER detects it: every local change is classified patch vs
+  rewrite (≥50% churn & ≥4 lines); a rewrite is auto-recorded on a shared
+  `board` Y.Map with who/when/how-much/which-symbols, rendered to a read-only
+  `HIVE_BOARD.md` in every folder. Small patches stay silent (no noise). Proven
+  in `folder-board-test.js`: a one-line patch is NOT logged; a wholesale rewrite
+  auto-appears on BOTH folders ("A rewrote app.js (7/11 lines) — touched: login,
+  logout"). Honest limit: captures WHAT (objective, from the diff); WHY (intent)
+  still needs the agent to state it. Extension repackaged → hivecode.vsix v0.2.3.
+
+
 - **THE FIX: 3-way merge moved into the SYNC LAYER** (`merge3` in core.js;
   `reconcile()` in folder.js AND the extension). Root cause of "the second
   agent's full rewrite wiped the first's work": the merge logic only lived in
