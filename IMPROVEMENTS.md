@@ -38,6 +38,21 @@ Work done while you were at lunch. Every change verified before moving on.
 
 ## Also done
 
+- **HUMAN ↔ AI COORDINATION + permission gate** (`sync.js` tasks/owners +
+  `hive-mcp.js` task tools + extension panel chat/tasks UI; `hive-task-test.js`).
+  Humans and AIs share ONE visible chat, and a human can direct an AI to do work
+  — but the AI does NOT auto-obey: a directed task stays PENDING until the AI's
+  OWNER (the human responsible for it) approves; only then does the AI act.
+  Engine: `tasks` Y.Map + `owners` Y.Map; `assign/decide/complete/myTasks`;
+  rendered to `HIVE_TASKS.md`; an AI records its owner on join (kind:ai + owner).
+  MCP tools added: hive_assign, hive_read_tasks, hive_approve, hive_deny,
+  hive_complete (+ owner arg on hive_join). Extension panel now shows live CHAT
+  (everyone visible) with an input ("@Name do X" assigns a task) and a TASKS list
+  with Approve/Deny buttons; ext v0.2.5. Proven in `hive-task-test.js`: human
+  assigns → AI sees PENDING (must not act) → non-owner approval REJECTED → owner
+  approves → AI sees ACCEPTED → completes. All 6 live tests + 38 unit tests pass.
+
+
 - **MCP SERVER — AIs join as native tool calls** (`hive-mcp.js` + `MCP.md` +
   `hive-mcp-test.js`). The lowest-friction adoption path: any MCP-capable agent
   (Claude Code/Desktop, etc.) registers the server once and gets tools —

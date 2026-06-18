@@ -20,7 +20,7 @@ const { WebSocket } = require('ws')
 const IGNORE = new Set(['node_modules', '.git', '.vscode'])
 const MAX_BYTES = 1_000_000
 // generated/coordination files — never synced as ordinary files
-const SKIP = new Set(['HIVE_BOARD.md', 'HIVE_CHAT.md', 'HIVE_RULES.md', '.hive.json'])
+const SKIP = new Set(['HIVE_BOARD.md', 'HIVE_CHAT.md', 'HIVE_TASKS.md', 'HIVE_RULES.md', '.hive.json'])
 const HIVE_RULES_TEXT = `# HIVE RULES — read this first. Everyone in this room (human or AI) follows these.
 
 You are in a Hivecode room: humans and AI agents edit ONE project together live.
@@ -113,13 +113,18 @@ function pushState() {
   const members = membersList()
   setStatus(session ? 'on' : 'off', members.length)
   if (!panel) return
+  const chat = session ? session.chat.toArray().slice(-50) : []
+  const tasks = session ? [...session.tasks.values()].sort((a, b) => (a.at < b.at ? 1 : -1)) : []
   panel.post({
     type: 'state',
     connected: !!session,
     room: session ? session.room : null,
     link: session ? `${session.relay}|${session.room}` : null,
+    me: session ? session.me : null,
     members,
     activity,
+    chat,
+    tasks,
   })
 }
 
@@ -166,6 +171,9 @@ function start(root, room, relay) {
   const doc = new Y.Doc()
   const files = doc.getMap('files')
   const board = doc.getMap('board') // relPath -> { by, at, churn, symbols } (auto-logged rewrites)
+  const chat = doc.getArray('chat') // ordered messages { by, kind, at, text }
+  const tasks = doc.getMap('tasks') // id -> { id, to, by, text, status, decidedBy, at }
+  const owners = doc.getMap('owners') // aiName -> ownerHumanName
   const BOARD_FILE = 'HIVE_BOARD.md' // generated locally from `board`; never synced as a file
   const useRelay = relay || relayUrl()
   const provider = new WebsocketProvider(useRelay, room, doc, { WebSocketPolyfill: WebSocket })
@@ -305,6 +313,38 @@ function start(root, room, relay) {
     writeToDisk(BOARD_FILE, out.join('\n') + '\n')
   }
   board.observe(() => renderBoard())
+
+  // --- chat + directed tasks (human <-> AI coordination) ---
+  const fmtTime = () => new Date().toTimeString().slice(0, 8)
+  function say(textMsg) { if (textMsg) chat.push([{ by: me, kind, at: fmtTime(), text: String(textMsg) }]) }
+  function renderChat() {
+    const out = ['# Hive Chat — everyone (humans + AI) talks here.', '']
+    for (const m of chat.toArray()) out.push(`- ${m.at}  ${m.by} (${m.kind}): ${m.text}`)
+    writeToDisk('HIVE_CHAT.md', out.join('\n') + '\n')
+  }
+  function assign(to, textMsg) {
+    if (!to || !textMsg) return
+    const id = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+    tasks.set(id, { id, to, by: me, text: String(textMsg), status: 'pending', decidedBy: null, at: fmtTime() })
+    say(`@${to}: ${textMsg}  (task ${id} — pending ${owners.get(to) ? owners.get(to) + "'s" : 'owner'} approval)`)
+  }
+  function decide(id, accept) {
+    const t = tasks.get(id); if (!t) return
+    const ownerOf = owners.get(t.to)
+    if (ownerOf && me !== ownerOf) { logActivity(`only ${ownerOf} can approve task ${id}`); return }
+    tasks.set(id, { ...t, status: accept ? 'accepted' : 'denied', decidedBy: me })
+    say(`task ${id} ${accept ? 'APPROVED' : 'denied'} by ${me}: "${t.text}"`)
+  }
+  function renderTasks() {
+    const all = [...tasks.values()].sort((a, b) => (a.at < b.at ? 1 : -1))
+    const out = ['# Hive Tasks — directed work + approvals.', '']
+    if (!all.length) out.push('(no tasks)')
+    for (const t of all) out.push(`- [${t.status}] ${t.id}  ${t.by} -> ${t.to}: ${t.text}${t.decidedBy ? ` (by ${t.decidedBy})` : ''}`)
+    writeToDisk('HIVE_TASKS.md', out.join('\n') + '\n')
+  }
+  chat.observe(() => { renderChat(); pushState() })
+  tasks.observe(() => { renderTasks(); pushState() })
+
   function writeToDisk(r, content) {
     const full = path.join(root, r)
     fs.mkdirSync(path.dirname(full), { recursive: true })
@@ -364,12 +404,16 @@ function start(root, room, relay) {
     writeToDisk('HIVE_RULES.md', HIVE_RULES_TEXT) // the law is always present in the room
     for (const [key] of files.entries()) reconcile(key, 'remote') // pull + merge against local
     if (board.size) renderBoard() // surface rewrites logged before we joined
+    if (chat.length) renderChat()
+    if (tasks.size) renderTasks()
     scan()
     session.scanTimer = setInterval(scan, 400)
     logActivity('Synced')
+    pushState()
   })
 
-  session = { doc, provider, root, scanTimer: null, room, relay: useRelay }
+  // expose chat/task actions to the panel handler
+  session = { doc, provider, root, scanTimer: null, room, relay: useRelay, me, chat, tasks, owners, say, assign, decide }
   pushState()
 }
 
@@ -386,7 +430,13 @@ class HivecodeViewProvider {
       else if (m.type === 'copy') {
         vscode.env.clipboard.writeText(m.text || '')
         vscode.window.showInformationMessage('Hivecode: join link copied.')
-      } else if (m.type === 'ready') pushState()
+      } else if (m.type === 'say' && session) {
+        // "@Name do X" -> a directed task; anything else -> a chat message
+        const mm = (m.text || '').match(/^@(\S+)\s+(.+)/)
+        if (mm) session.assign(mm[1], mm[2]); else session.say(m.text || '')
+      } else if (m.type === 'approve' && session) session.decide(m.id, true)
+      else if (m.type === 'deny' && session) session.decide(m.id, false)
+      else if (m.type === 'ready') pushState()
     })
     pushState()
   }
@@ -414,6 +464,7 @@ function getHtml() {
   .log { font-size: 11px; line-height: 1.5; max-height: 220px; overflow:auto; opacity:.85; }
   .log div { padding: 1px 0; border-bottom: 1px solid var(--vscode-editorWidget-border, transparent); }
   .hidden { display: none; }
+  .mini { width: auto; padding: 1px 7px; margin: 0 2px; display: inline-block; }
 </style></head><body>
   <div class="status"><span id="dot" class="dot off"></span><span id="statustext">Not in a session</span></div>
 
@@ -434,6 +485,16 @@ function getHtml() {
   <h3>Members (<span id="count">0</span>)</h3>
   <div id="members"></div>
 
+  <div id="coord" class="hidden">
+    <h3>Tasks</h3>
+    <div id="tasks" class="log"></div>
+
+    <h3>Chat</h3>
+    <div id="chat" class="log"></div>
+    <input id="msg" placeholder="message… or @Name do X to assign a task" />
+    <button id="sendmsg" class="secondary">Send</button>
+  </div>
+
   <h3>Activity</h3>
   <div id="log" class="log"></div>
 
@@ -445,6 +506,9 @@ function getHtml() {
   $('leave').onclick = () => send('leave');
   $('join').onclick = () => send('join', { link: $('link').value });
   $('copy').onclick = () => send('copy', { text: $('hostlink').textContent });
+  const sendMsg = () => { const v = $('msg').value.trim(); if (v) { send('say', { text: v }); $('msg').value = ''; } };
+  $('sendmsg').onclick = sendMsg;
+  $('msg').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMsg(); });
 
   window.addEventListener('message', (e) => {
     const s = e.data;
@@ -453,12 +517,27 @@ function getHtml() {
     $('statustext').textContent = s.connected ? ('In room ' + (s.room || '')) : 'Not in a session';
     $('offControls').className = s.connected ? 'hidden' : '';
     $('onControls').className = s.connected ? '' : 'hidden';
+    $('coord').className = s.connected ? '' : 'hidden';
     $('hostlink').textContent = s.link || '';
     $('count').textContent = (s.members || []).length;
     $('members').innerHTML = (s.members || []).map((m) =>
       '<div class="member">' + escapeHtml(m.name) + '<span class="badge">' + (m.kind === 'ai' ? 'AI' : 'human') + '</span></div>'
     ).join('') || '<div style="opacity:.5">no one yet</div>';
+    $('chat').innerHTML = (s.chat || []).map((m) =>
+      '<div><b>' + escapeHtml(m.by) + '</b> <span class="badge">' + (m.kind === 'ai' ? 'AI' : 'human') + '</span>: ' + escapeHtml(m.text) + '</div>'
+    ).join('') || '<div style="opacity:.5">no messages yet</div>';
+    $('chat').scrollTop = $('chat').scrollHeight;
+    $('tasks').innerHTML = (s.tasks || []).map((t) => {
+      let row = '<div>[' + escapeHtml(t.status) + '] <b>' + escapeHtml(t.by) + '</b> → ' + escapeHtml(t.to) + ': ' + escapeHtml(t.text);
+      if (t.status === 'pending') row += ' <button class="mini" data-act="approve" data-id="' + escapeHtml(t.id) + '">approve</button>'
+        + '<button class="mini secondary" data-act="deny" data-id="' + escapeHtml(t.id) + '">deny</button>';
+      return row + '</div>';
+    }).join('') || '<div style="opacity:.5">no tasks</div>';
     $('log').innerHTML = (s.activity || []).map((l) => '<div>' + escapeHtml(l) + '</div>').join('');
+  });
+  $('tasks').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-act]'); if (!b) return;
+    send(b.dataset.act, { id: b.dataset.id });
   });
   function escapeHtml(x){ return String(x).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   send('ready');
