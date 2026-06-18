@@ -8,6 +8,16 @@ projA/
 projB/
 workspace/
 aiproj/
+.collide-test/
+.board-test/
+.agent-test/
+.talk-test/
+.mcp-test/
+
+# generated coordination artifacts (regenerated per session from CRDT state)
+HIVE_CHAT.md
+HIVE_BOARD.md
+.hive.json
 
 # build artifacts
 *.vsix
