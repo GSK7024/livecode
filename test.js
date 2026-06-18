@@ -5,7 +5,7 @@
 // can be verified instantly.
 
 import * as Y from 'yjs'
-import { applyDiff, safeBump, lockHeldByOther, lockOrder, negotiate, mergeEdit, merge3 } from './core.js'
+import { applyDiff, safeBump, lockHeldByOther, lockOrder, negotiate, mergeEdit, merge3, summarizeChange } from './core.js'
 
 let passed = 0
 let failed = 0
@@ -161,6 +161,44 @@ section('merge3 (sync-layer 3-way merge — never silently loses work)')
   const theirs = 'function login() {\n  return ok\n}\n// added by B'
   const r = merge3(f, mine, theirs)
   check('disjoint top/bottom edits merge', !r.conflict && r.text.includes('// added by A') && r.text.includes('// added by B'))
+}
+
+// ---------------------------------------------------------------------------
+section('summarizeChange (auto-board: patch vs rewrite + what)')
+{
+  const file = [
+    'function login(u, p) {',
+    '  return check(u, p)',
+    '}',
+    'function logout() {',
+    '  clearSession()',
+    '}',
+    'function ping() {',
+    '  return 1',
+    '}',
+  ].join('\n')
+  // small grep-and-patch (one line) -> NOT a rewrite -> no board entry
+  const patched = file.replace('return check(u, p)', 'return check(u, p) && rateLimit(u)')
+  check('small patch is not flagged as rewrite', summarizeChange(file, patched).isRewrite === false)
+  // wholesale rewrite of most of the file -> IS a rewrite
+  const rewritten = [
+    'function login(user, pass, opts) {',
+    '  validate(user)',
+    '  return check(user, pass, opts)',
+    '}',
+    'function logout(session) {',
+    '  clearSession(session)',
+    '  audit("logout")',
+    '}',
+    'function ping() {',
+    '  return Date.now()',
+    '}',
+  ].join('\n')
+  const s = summarizeChange(file, rewritten)
+  check('wholesale change is flagged as rewrite', s.isRewrite === true)
+  check('records which symbols were touched', s.symbols.includes('login') && s.symbols.includes('logout'))
+  // brand-new file is a create, not a rewrite
+  check('new file is not a rewrite', summarizeChange('', 'function x() {}').isRewrite === false)
 }
 
 // ---------------------------------------------------------------------------

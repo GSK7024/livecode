@@ -125,6 +125,35 @@ export function merge3(base, mine, theirs) {
   return { text: out.join('\n'), conflict: true }
 }
 
+// --- Rewrite detection for the auto-board ---
+// Classify a change as a small PATCH (grep-and-edit, the common case) vs a
+// wholesale REWRITE, and pull out the symbol names the new version defines in
+// the changed region. The sync layer uses this to AUTO-record what an agent did
+// on a rewrite — so other agents learn of it even when the agent forgets to say.
+//   summarizeChange(base, next) -> { isRewrite, changedLines, totalLines, symbols }
+export function summarizeChange(base, next) {
+  const b = (base || '').split('\n')
+  const n = (next || '').split('\n')
+  if (!base) return { isRewrite: false, changedLines: n.length, totalLines: n.length, symbols: symbolsIn(next || '') }
+  const r = changedRange(b, n)
+  const churn = Math.max(r.endBase - r.startBase, r.newLines.length) // lines replaced or added
+  const total = Math.max(b.length, n.length)
+  // a rewrite = at least half the file churned (and more than a couple of lines)
+  const isRewrite = total > 0 && churn >= 4 && churn / total >= 0.5
+  return { isRewrite, changedLines: churn, totalLines: total, symbols: symbolsIn(r.newLines.join('\n')) }
+}
+
+// Best-effort "what was defined here" across common languages — for the board.
+function symbolsIn(text) {
+  const names = new Set()
+  const add = (re) => { let m; while ((m = re.exec(text)) && names.size < 8) names.add(m[1]) }
+  add(/\bfunction\s+(\w+)/g)        // function foo
+  add(/\bclass\s+(\w+)/g)           // class Foo
+  add(/\bdef\s+(\w+)/g)             // def foo (python)
+  add(/\b(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=/g) // const foo =
+  return [...names].slice(0, 8)
+}
+
 // Which base line-range an edit replaced, and the replacement lines.
 function changedRange(base, other) {
   let p = 0

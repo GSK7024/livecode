@@ -20,7 +20,7 @@ import path from 'path'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 import { WebSocket } from 'ws'
-import { applyDiff, merge3 } from './core.js'
+import { applyDiff, merge3, summarizeChange } from './core.js'
 
 const [, , RELAY = 'ws://localhost:1234', ROOM = 'default', DIR = '.', NAME = 'anon'] = process.argv
 const ROOT = path.resolve(DIR)
@@ -30,6 +30,8 @@ const MAX_BYTES = 1_000_000
 
 const doc = new Y.Doc()
 const files = doc.getMap('files') // relPath -> Y.Text
+const board = doc.getMap('board') // relPath -> { by, at, churn, symbols } (auto-logged rewrites)
+const BOARD_FILE = 'HIVE_BOARD.md'  // generated locally from `board`; never synced as a file
 const provider = new WebsocketProvider(RELAY, ROOM, doc, { WebSocketPolyfill: WebSocket })
 provider.awareness.setLocalStateField('user', { name: NAME, kind: 'human' })
 
@@ -68,8 +70,11 @@ function writeToDisk(relPath, content) {
 
 // The heart of it. Bring one file's disk copy and shared-doc copy into agreement
 // via a 3-way merge against its last agreed base, writing the result to whichever
-// side is behind. Safe to call from either direction (scan or remote observer).
-function reconcile(relPath) {
+// side is behind. Safe to call from either direction. `origin` says whether THIS
+// machine made the change (local scan) or it arrived from a peer (remote) — only
+// the local author auto-logs a rewrite to the board.
+function reconcile(relPath, origin = 'local') {
+  if (relPath === BOARD_FILE) return // the board file is generated, never synced
   const full = path.join(ROOT, relPath)
   const yt = files.get(relPath)
   const disk = fs.existsSync(full) ? readText(full) : null
@@ -88,6 +93,7 @@ function reconcile(relPath) {
 
   // Both sides exist and differ -> 3-way merge against the last agreed base.
   const base = bases.has(relPath) ? bases.get(relPath) : disk
+  if (origin === 'local') noteIfRewrite(relPath, base, disk) // auto-log big rewrites
   const res = merge3(base, disk, docText)
   doc.transact(() => applyDiff(yt, res.text)) // local txn -> observer ignores it
   if (res.text !== disk) writeToDisk(relPath, res.text)
@@ -95,6 +101,32 @@ function reconcile(relPath) {
   if (res.conflict) console.log(`[${NAME}] ⚠ merge conflict in ${relPath} — kept BOTH versions with <<<<<<< markers; resolve when ready`)
   else console.log(`[${NAME}] merged ${relPath} (both edits kept)`)
 }
+
+// AUTO-BOARD: when a local change is a wholesale rewrite (not a small patch),
+// record it on the shared board so other agents see WHAT changed before they
+// touch the file. The agent doesn't have to remember — the sync layer does it.
+const fmtTime = () => new Date().toTimeString().slice(0, 8)
+function noteIfRewrite(relPath, base, next) {
+  if (!base) return // brand-new file is a create, not a rewrite
+  const s = summarizeChange(base, next)
+  if (!s.isRewrite) return
+  board.set(relPath, { by: NAME, at: fmtTime(), churn: `${s.changedLines}/${s.totalLines} lines`, symbols: s.symbols })
+  console.log(`[${NAME}] board: logged REWRITE of ${relPath} (${s.changedLines}/${s.totalLines} lines; touched ${s.symbols.join(', ') || 'n/a'})`)
+}
+
+// Render the shared board to a local file every agent can just read.
+function renderBoard() {
+  const out = [
+    '# Hive Board — recent full-file rewrites (auto-logged by Hivecode).',
+    '# READ THIS before editing a file someone just rewrote, then re-read that file.',
+    '',
+  ]
+  const entries = [...board.entries()].map(([file, e]) => ({ file, ...e })).sort((a, b) => (a.at < b.at ? 1 : -1))
+  if (!entries.length) out.push('(no rewrites yet — patches and small edits are not listed)')
+  for (const e of entries) out.push(`- ${e.at}  ${e.by} rewrote \`${e.file}\` (${e.churn}) — touched: ${(e.symbols || []).join(', ') || 'n/a'}`)
+  writeToDisk(BOARD_FILE, out.join('\n') + '\n')
+}
+board.observe(() => renderBoard())
 
 // DISK -> reconcile: scan the folder; reconcile any file whose mtime changed.
 // Unchanged files are skipped entirely, so a large project costs ~nothing/tick.
@@ -104,12 +136,13 @@ function scan() {
   let touched = false
   for (const full of diskFulls) {
     const r = rel(full)
+    if (r === BOARD_FILE) continue // generated locally; don't sync it
     let mt
     try { mt = fs.statSync(full).mtimeMs } catch { continue }
     if (mtimes.get(r) === mt && files.has(r)) continue // unchanged -> skip read
     if (readText(full) === null) continue              // binary/huge -> skip
     mtimes.set(r, mt)
-    reconcile(r)
+    reconcile(r, 'local')
     touched = true
   }
   const removed = [...known].filter((r) => !diskRel.has(r) && files.has(r))
@@ -134,12 +167,12 @@ files.observeDeep((events, txn) => {
           known.delete(key); bases.delete(key)
           console.log(`[${NAME}] <- deleted ${key}`)
         } else {
-          reconcile(key)
+          reconcile(key, 'remote')
         }
       })
     } else {
       for (const [key, yt] of files.entries()) {
-        if (yt === ev.target) { reconcile(key); break }
+        if (yt === ev.target) { reconcile(key, 'remote'); break }
       }
     }
   }
@@ -148,7 +181,8 @@ files.observeDeep((events, txn) => {
 provider.on('sync', (s) => {
   if (!s) return
   // pull any files the room already has, reconciling against our local copies...
-  for (const [key] of files.entries()) reconcile(key)
+  for (const [key] of files.entries()) reconcile(key, 'remote')
+  if (board.size) renderBoard() // surface any rewrites logged before we joined
   scan() // ...then push/reconcile our local files
   console.log(`[${NAME}] folder sync active on ${ROOT} (room "${ROOM}"). ${files.size} files.`)
   setInterval(scan, 400)

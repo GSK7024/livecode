@@ -138,6 +138,8 @@ function leaveSession() {
 function start(root, room, relay) {
   const doc = new Y.Doc()
   const files = doc.getMap('files')
+  const board = doc.getMap('board') // relPath -> { by, at, churn, symbols } (auto-logged rewrites)
+  const BOARD_FILE = 'HIVE_BOARD.md' // generated locally from `board`; never synced as a file
   const useRelay = relay || relayUrl()
   const provider = new WebsocketProvider(useRelay, room, doc, { WebSocketPolyfill: WebSocket })
   // Unique per window: doc.clientID is distinct even for two windows on one
@@ -193,6 +195,22 @@ function start(root, room, relay) {
     while (s < base.length - p && s < other.length - p && base[base.length - 1 - s] === other[other.length - 1 - s]) s++
     return { startBase: p, endBase: base.length - s, newLines: other.slice(p, other.length - s) }
   }
+  // patch vs wholesale rewrite + which symbols the new version defines (for the board)
+  function symbolsIn(text) {
+    const names = new Set()
+    const add = (re) => { let m; while ((m = re.exec(text)) && names.size < 8) names.add(m[1]) }
+    add(/\bfunction\s+(\w+)/g); add(/\bclass\s+(\w+)/g); add(/\bdef\s+(\w+)/g)
+    add(/\b(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=/g)
+    return [...names].slice(0, 8)
+  }
+  function summarizeChange(base, next) {
+    const b = (base || '').split('\n'); const n = (next || '').split('\n')
+    if (!base) return { isRewrite: false, changedLines: n.length, totalLines: n.length, symbols: symbolsIn(next || '') }
+    const r = changedRange(b, n)
+    const churn = Math.max(r.endBase - r.startBase, r.newLines.length)
+    const total = Math.max(b.length, n.length)
+    return { isRewrite: total > 0 && churn >= 4 && churn / total >= 0.5, changedLines: churn, totalLines: total, symbols: symbolsIn(r.newLines.join('\n')) }
+  }
   // 3-way merge: disjoint edits merge cleanly; overlapping edits get git-style
   // markers so BOTH versions survive (nobody's work is silently lost).
   function merge3(base, mine, theirs) {
@@ -216,7 +234,8 @@ function start(root, room, relay) {
   }
   // Bring one file's disk copy and shared-doc copy into agreement via 3-way
   // merge against its last agreed base. Safe from either direction.
-  function reconcile(r) {
+  function reconcile(r, origin = 'local') {
+    if (r === BOARD_FILE) return // the board file is generated, never synced
     const full = path.join(root, r)
     const yt = files.get(r)
     const disk = fs.existsSync(full) ? readText(full) : null
@@ -231,12 +250,34 @@ function start(root, room, relay) {
     if (disk === null) { writeToDisk(r, docText); bases.set(r, docText); return }
     if (disk === docText) { known.add(r); bases.set(r, disk); return }
     const base = bases.has(r) ? bases.get(r) : disk
+    if (origin === 'local') noteIfRewrite(r, base, disk) // auto-log big rewrites
     const res = merge3(base, disk, docText)
     doc.transact(() => applyDiff(yt, res.text)) // local txn -> observer ignores
     if (res.text !== disk) writeToDisk(r, res.text)
     known.add(r); bases.set(r, res.text)
     logActivity(res.conflict ? `merge conflict in ${r} — kept BOTH (resolve <<<<<<< markers)` : `merged ${r} (both edits kept)`)
   }
+  // AUTO-BOARD: a local wholesale rewrite is recorded for everyone — the agent
+  // doesn't have to remember; the sync layer sees the diff and logs it.
+  function noteIfRewrite(r, base, next) {
+    if (!base) return
+    const s = summarizeChange(base, next)
+    if (!s.isRewrite) return
+    board.set(r, { by: me, at: new Date().toTimeString().slice(0, 8), churn: `${s.changedLines}/${s.totalLines} lines`, symbols: s.symbols })
+    logActivity(`REWRITE: ${me} rewrote ${r} (${s.changedLines}/${s.totalLines} lines; touched ${s.symbols.join(', ') || 'n/a'})`)
+  }
+  function renderBoard() {
+    const out = [
+      '# Hive Board — recent full-file rewrites (auto-logged by Hivecode).',
+      '# READ THIS before editing a file someone just rewrote, then re-read that file.',
+      '',
+    ]
+    const entries = [...board.entries()].map(([file, e]) => ({ file, ...e })).sort((a, b) => (a.at < b.at ? 1 : -1))
+    if (!entries.length) out.push('(no rewrites yet — patches and small edits are not listed)')
+    for (const e of entries) out.push(`- ${e.at}  ${e.by} rewrote \`${e.file}\` (${e.churn}) — touched: ${(e.symbols || []).join(', ') || 'n/a'}`)
+    writeToDisk(BOARD_FILE, out.join('\n') + '\n')
+  }
+  board.observe(() => renderBoard())
   function writeToDisk(r, content) {
     const full = path.join(root, r)
     fs.mkdirSync(path.dirname(full), { recursive: true })
@@ -251,12 +292,13 @@ function start(root, room, relay) {
     const onDisk = new Set(fulls.map(rel))
     for (const full of fulls) {
       const r = rel(full)
+      if (r === BOARD_FILE) continue // generated locally; don't sync it
       let mt
       try { mt = fs.statSync(full).mtimeMs } catch { continue }
       if (mtimes.get(r) === mt && files.has(r)) continue
       if (readText(full) === null) continue
       mtimes.set(r, mt)
-      reconcile(r) // 3-way merge instead of blind overwrite
+      reconcile(r, 'local') // 3-way merge instead of blind overwrite
     }
     const removed = [...known].filter((r) => !onDisk.has(r) && files.has(r))
     if (removed.length) {
@@ -272,11 +314,11 @@ function start(root, room, relay) {
       if (ev.target === files) {
         ev.changes.keys.forEach((change, key) => {
           if (change.action === 'delete') { try { fs.rmSync(path.join(root, key)) } catch {}; known.delete(key); bases.delete(key); logActivity(`deleted ${key}`) }
-          else reconcile(key) // merge remote change with any local edits
+          else reconcile(key, 'remote') // merge remote change with any local edits
         })
       } else {
         for (const [key, yt] of files.entries()) {
-          if (yt === ev.target) { reconcile(key); break }
+          if (yt === ev.target) { reconcile(key, 'remote'); break }
         }
       }
     }
@@ -292,7 +334,8 @@ function start(root, room, relay) {
 
   provider.on('sync', (s) => {
     if (!s) return
-    for (const [key] of files.entries()) reconcile(key) // pull + merge against local
+    for (const [key] of files.entries()) reconcile(key, 'remote') // pull + merge against local
+    if (board.size) renderBoard() // surface rewrites logged before we joined
     scan()
     session.scanTimer = setInterval(scan, 400)
     logActivity('Synced')
