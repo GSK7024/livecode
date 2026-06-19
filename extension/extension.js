@@ -110,10 +110,11 @@ function logActivity(msg) {
 
 function membersList() {
   if (!session) return []
+  const fresh = Date.now() - 15000
   return [...session.provider.awareness.getStates().values()]
     .map((s) => s.user)
     .filter(Boolean)
-    .map((u) => ({ name: u.name, kind: u.kind || 'human' }))
+    .map((u) => ({ name: u.name, kind: u.kind || 'human', editing: u.editing && u.editing.at > fresh ? u.editing.file : null }))
 }
 
 function pushState() {
@@ -168,6 +169,7 @@ function joinSessionWithLink(link) {
 function leaveSession() {
   if (!session) return
   clearInterval(session.scanTimer)
+  try { session.stopActivity && session.stopActivity() } catch {}
   try { session.provider.destroy() } catch {}
   try { session.doc.destroy() } catch {}
   session = null
@@ -200,6 +202,31 @@ function start(root, room, relay) {
   // Advances only on local authorship / first adoption — NOT when a remote change
   // lands on disk. Stops a stale local rewrite from silently deleting another's work.
   const seenMembers = new Set()
+  // --- live activity: broadcast which file this window is editing + warn on co-editing ---
+  const EDIT_FRESH_MS = 15000
+  let myEditing = null, editingClearTimer = null
+  const warnedAt = new Map()
+  const setUserState = () => { try { provider.awareness.setLocalStateField('user', { name: me, kind, editing: myEditing || undefined }) } catch {} }
+  function markEditing(r) {
+    myEditing = { file: r, at: Date.now() }; setUserState()
+    if (editingClearTimer) clearTimeout(editingClearTimer)
+    editingClearTimer = setTimeout(() => { myEditing = null; setUserState() }, EDIT_FRESH_MS)
+  }
+  function coEditors(r) {
+    const now = Date.now(), others = []
+    for (const s of provider.awareness.getStates().values()) {
+      const u = s.user; if (!u || u.name === me) continue
+      if (u.editing && u.editing.file === r && now - u.editing.at < EDIT_FRESH_MS) others.push(u.name)
+    }
+    return others
+  }
+  function noteCoEditing(r) {
+    const others = coEditors(r), now = Date.now()
+    if (others.length && now - (warnedAt.get(r) || 0) > 30000) {
+      warnedAt.set(r, now)
+      try { say(`⚠ heads-up: ${me} is also editing ${r} (with ${others.join(', ')}). Small patches auto-merge; coordinate before a full rewrite.`) } catch {}
+    }
+  }
 
   vscode.workspace.getConfiguration('files').update('autoSave', 'afterDelay', vscode.ConfigurationTarget.Workspace)
 
@@ -313,6 +340,7 @@ function start(root, room, relay) {
     }
     const base = bases.has(r) ? bases.get(r) : disk
     const fork = forkBases.has(r) ? forkBases.get(r) : base
+    if (origin === 'local') { noteCoEditing(r); markEditing(r) } // broadcast activity + warn if someone else is on this file
     let res, reAdded = false
     if (origin === 'local' && docText.includes('<<<<<<<') && !disk.includes('<<<<<<<')) {
       // Resolving a conflict: doc has markers, this write removed them — author resolved it.
@@ -453,8 +481,12 @@ function start(root, room, relay) {
     const seen = new Map()
     for (const s of provider.awareness.getStates().values()) if (s.user && s.user.name) seen.set(s.user.name, s.user)
     const us = [...seen.values()]
+    const now = Date.now()
     const out = ['# Hive Members — who is in this room right now (live).', '', `count: ${us.length}`, '']
-    for (const u of us) out.push(`- ${u.name} (${u.kind})${u.owner ? ' — owned by ' + u.owner : ''}`)
+    for (const u of us) {
+      const ed = u.editing && now - u.editing.at < EDIT_FRESH_MS ? ` — editing ${u.editing.file}` : ''
+      out.push(`- ${u.name} (${u.kind})${u.owner ? ' — owned by ' + u.owner : ''}${ed}`)
+    }
     writeToDisk('HIVE_MEMBERS.md', out.join('\n') + '\n')
   }
   provider.awareness.on('change', () => {
@@ -480,7 +512,7 @@ function start(root, room, relay) {
   })
 
   // expose chat/task actions to the panel handler
-  session = { doc, provider, root, scanTimer: null, room, relay: useRelay, me, chat, tasks, owners, say, assign, decide }
+  session = { doc, provider, root, scanTimer: null, room, relay: useRelay, me, chat, tasks, owners, say, assign, decide, stopActivity: () => { if (editingClearTimer) clearTimeout(editingClearTimer) } }
   pushState()
 }
 
@@ -527,6 +559,7 @@ function getHtml() {
   .on { background:#3fb950; } .off { background:#888; }
   .member { padding: 3px 0; }
   .badge { font-size: 10px; padding: 1px 5px; border-radius: 8px; margin-left: 6px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+  .editing { font-size: 10px; margin-left: 6px; opacity: 0.8; color: var(--vscode-charts-green, #3fb950); }
   .link { word-break: break-all; font-size: 11px; padding: 6px; background: var(--vscode-textBlockQuote-background); border-radius: 4px; }
   .log { font-size: 11px; line-height: 1.5; max-height: 220px; overflow:auto; opacity:.85; }
   .log div { padding: 1px 0; border-bottom: 1px solid var(--vscode-editorWidget-border, transparent); }
@@ -588,7 +621,7 @@ function getHtml() {
     $('hostlink').textContent = s.link || '';
     $('count').textContent = (s.members || []).length;
     $('members').innerHTML = (s.members || []).map((m) =>
-      '<div class="member">' + escapeHtml(m.name) + '<span class="badge">' + (m.kind === 'ai' ? 'AI' : 'human') + '</span></div>'
+      '<div class="member">' + escapeHtml(m.name) + '<span class="badge">' + (m.kind === 'ai' ? 'AI' : 'human') + '</span>' + (m.editing ? '<span class="editing">editing ' + escapeHtml(m.editing) + '</span>' : '') + '</div>'
     ).join('') || '<div style="opacity:.5">no one yet</div>';
     $('chat').innerHTML = (s.chat || []).map((m) =>
       '<div><b>' + escapeHtml(m.by) + '</b> <span class="badge">' + (m.kind === 'ai' ? 'AI' : 'human') + '</span>: ' + escapeHtml(m.text) + '</div>'
