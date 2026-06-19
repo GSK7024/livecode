@@ -15,6 +15,7 @@ aiproj/
 # test temp dirs
 .collide-test/
 .clobber-test/
+.activity-test/
 .board-test/
 .agent-test/
 .talk-test/

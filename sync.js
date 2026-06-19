@@ -180,6 +180,7 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
     }
     const base = bases.has(relPath) ? bases.get(relPath) : disk
     const fork = forkBases.has(relPath) ? forkBases.get(relPath) : base
+    if (origin === 'local') { noteCoEditing(relPath); markEditing(relPath) } // broadcast activity + warn if someone else is on this file
 
     let res, reAdded = false
     if (origin === 'local' && docText.includes('<<<<<<<') && !disk.includes('<<<<<<<')) {
@@ -308,7 +309,40 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   }
   if (syncFiles) tasks.observe(() => renderTasks())
 
-  // --- live presence: who is in the room (humans + AIs), updated on join/leave ---
+  // --- live presence + activity: who is here AND what they're touching right now ---
+  // Each client broadcasts the file it is currently editing via awareness, so the
+  // whole room (and a watching human) sees "who is on what" live — the control-room
+  // view of parallel agents. When you start editing a file someone else is already
+  // on, you post a one-time heads-up so collisions get coordinated BEFORE a clobber,
+  // not just merged after. Activity decays after EDIT_FRESH_MS of no edits.
+  const EDIT_FRESH_MS = 15000
+  let myEditing = null
+  let editingClearTimer = null
+  const warnedAt = new Map() // file -> last time we warned about co-editing it
+  const setUserState = () => provider.awareness.setLocalStateField('user', { name, kind, owner: owner || undefined, editing: myEditing || undefined })
+  function markEditing(relPath) {
+    myEditing = { file: relPath, at: Date.now() }
+    setUserState()
+    if (editingClearTimer) clearTimeout(editingClearTimer)
+    editingClearTimer = setTimeout(() => { myEditing = null; setUserState() }, EDIT_FRESH_MS) // let activity fade
+  }
+  function coEditors(relPath) {
+    const now = Date.now(), others = []
+    for (const s of provider.awareness.getStates().values()) {
+      const u = s.user
+      if (!u || u.name === name) continue
+      if (u.editing && u.editing.file === relPath && now - u.editing.at < EDIT_FRESH_MS) others.push(u.name)
+    }
+    return others
+  }
+  function noteCoEditing(relPath) {
+    const others = coEditors(relPath)
+    const now = Date.now()
+    if (others.length && now - (warnedAt.get(relPath) || 0) > 30000) {
+      warnedAt.set(relPath, now)
+      try { say(`⚠ heads-up: ${name} is also editing ${relPath} (with ${others.join(', ')}). Small patches auto-merge; coordinate before a full rewrite.`) } catch { }
+    }
+  }
   function memberList() {
     const seen = new Map()
     for (const s of provider.awareness.getStates().values()) {
@@ -318,8 +352,12 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   }
   function renderMembers() {
     const us = memberList()
+    const now = Date.now()
     const out = ['# Hive Members — who is in this room right now (live).', '', `count: ${us.length}`, '']
-    for (const u of us) out.push(`- ${u.name} (${u.kind})${u.owner ? ' — owned by ' + u.owner : ''}`)
+    for (const u of us) {
+      const ed = u.editing && now - u.editing.at < EDIT_FRESH_MS ? ` — editing ${u.editing.file}` : ''
+      out.push(`- ${u.name} (${u.kind})${u.owner ? ' — owned by ' + u.owner : ''}${ed}`)
+    }
     writeToDisk(MEMBERS_FILE, out.join('\n') + '\n')
   }
   if (syncFiles) provider.awareness.on('change', () => renderMembers())
@@ -410,6 +448,7 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
     stop: () => {
       if (scanTimer) clearInterval(scanTimer)
       if (debounce) clearTimeout(debounce)
+      if (editingClearTimer) clearTimeout(editingClearTimer)
       try { watcher && watcher.close() } catch { }
       try { provider.awareness.setLocalState(null) } catch { } // announce departure now (don't wait for timeout)
       try { provider.destroy() } catch { }

@@ -4,6 +4,17 @@ Work done while you were at lunch. Every change verified before moving on.
 
 ## Done & verified
 
+### LIVE ACTIVITY / CONTROL ROOM (`sync.js`, extension, `hive-mcp.js`; `hive-activity-test.js`)
+Strengthens the actual moat (visibility + control over parallel agents). Each
+client now BROADCASTS which file it is editing via awareness; the live member list
+(HIVE_MEMBERS.md + the extension panel + MCP hive_members) shows "Name — editing
+foo.js" and fades after 15s idle. When a SECOND participant starts editing a file
+someone is already on, the late starter posts a one-time chat heads-up ("⚠ Bob is
+also editing shared.js (with Alice)…") — proactive collision coordination BEFORE a
+clobber, complementing the after-the-fact merge. Rate-limited (30s/file) so it's not
+noisy. Proven in hive-activity-test.js: activity shows up, the heads-up fires naming
+both editors, both edits still merge, status clears after idle. Extension v0.2.10.
+
 ### THE SILENT-LOSS FIX (fork-point merge) — `core.js`, `sync.js`, extension; `merge-clobber-test.js`
 A live two-process field test (MCP agent + a second client over the hosted relay)
 reproduced the original "second agent's rewrite wipes the first's work" bug — and

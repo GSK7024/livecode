@@ -145,7 +145,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'hive_approve': { const r = requireSession().hive.decide(String(args.id), true); return r.ok ? text(`approved ${args.id}`) : err(r.error) }
       case 'hive_deny': { const r = requireSession().hive.decide(String(args.id), false); return r.ok ? text(`denied ${args.id}`) : err(r.error) }
       case 'hive_complete': { const r = requireSession().hive.complete(String(args.id), String(args.note || '')); return r.ok ? text(`completed ${args.id}`) : err(r.error) }
-      case 'hive_members': { return text(requireSession().hive.members().map((m) => `${m.name} (${m.kind})`).join('\n') || '(none)') }
+      case 'hive_members': { const now = Date.now(); return text(requireSession().hive.members().map((m) => `${m.name} (${m.kind})${m.editing && now - m.editing.at < 15000 ? ` — editing ${m.editing.file}` : ''}`).join('\n') || '(none)') }
       case 'hive_status': { const s = requireSession(); return text({ room: s.room, relay: s.relay, dir: s.dir, name: s.name }) }
       case 'hive_leave': { requireSession().hive.stop(); session = null; return text('left the room') }
       default: return err(`unknown tool: ${name}`)
