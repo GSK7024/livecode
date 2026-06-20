@@ -20,7 +20,29 @@ import path from 'path'
 import * as Y from 'yjs'
 import { WebSocketServer } from 'ws'
 import { setupWSConnection, setPersistence } from 'y-websocket/bin/utils'
-import { verify, scopeForRoom } from './token.js'
+import { verify, scopeForRoom, baseRoomOf, pathOf, pathAllowed } from './token.js'
+import * as decoding from 'lib0/decoding'
+
+// Enforce a read-only connection: drop the client's inbound SYNC writes (sync
+// step2 + update) so they can never mutate shared state, while still letting it
+// receive state (sync step1) and presence (awareness). We wrap conn.on so that
+// the message handler y-websocket registers next is filtered.
+function makeReadOnly(conn) {
+  const realOn = conn.on.bind(conn)
+  conn.on = (event, handler) => {
+    if (event !== 'message') return realOn(event, handler)
+    return realOn('message', (data, ...rest) => {
+      try {
+        const dec = decoding.createDecoder(new Uint8Array(data))
+        if (decoding.readVarUint(dec) === 0) { // 0 = sync
+          const syncType = decoding.readVarUint(dec)
+          if (syncType === 1 || syncType === 2) return // 1=step2, 2=update -> a WRITE; drop it
+        }
+      } catch { /* unparseable -> let it through */ }
+      return handler(data, ...rest)
+    })
+  }
+}
 
 const PORT = process.env.PORT || 1234
 
@@ -62,9 +84,19 @@ function authorize(room, token) {
   if (!res.ok) return { ok: false, code: 401, reason: res.error }
   const p = res.payload
   if (p.jti && revokedSet().has(p.jti)) return { ok: false, code: 401, reason: 'token revoked' }
-  const sc = scopeForRoom(p, room)
+  // A project is a base room plus per-file rooms ("<base>␁<path>"). Authorize on
+  // the BASE room, and — for a file-room — also require the file's path to match
+  // the scope's path globs. This is the Phase-3 guarantee: a scoped agent's
+  // connection to an out-of-scope file is rejected here, so that file's bytes
+  // never reach it.
+  const base = baseRoomOf(room)
+  const sc = scopeForRoom(p, base)
   if (!sc) return { ok: false, code: 403, reason: 'room not in token scope' }
-  return { ok: true, identity: { sub: p.sub, name: p.name, kind: p.kind, owner: p.owner }, role: sc.role || 'writer' }
+  const filePath = pathOf(room)
+  if (filePath !== null && !pathAllowed(sc.paths, filePath)) {
+    return { ok: false, code: 403, reason: `path "${filePath}" not in scope` }
+  }
+  return { ok: true, identity: { sub: p.sub, name: p.name, kind: p.kind, owner: p.owner }, role: sc.role || 'writer', path: filePath }
 }
 
 // --- optional persistence (plain-file snapshots per room) ---
@@ -121,6 +153,7 @@ server.on('upgrade', (req, socket, head) => {
 wss.on('connection', (conn, req) => {
   const room = (conn._hive && conn._hive.room) || (req.url || '/').slice(1).split('?')[0] || 'default'
   console.log(`[relay] a client joined room "${room}"${conn._hive ? ` as ${conn._hive.identity.name} (${conn._hive.role})` : ''}`)
+  if (conn._hive && conn._hive.role === 'reader') makeReadOnly(conn) // enforce read-only BEFORE y-websocket wires its handler
   setupWSConnection(conn, req, { docName: room })
 })
 

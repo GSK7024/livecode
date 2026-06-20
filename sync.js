@@ -22,6 +22,7 @@ import { WebsocketProvider } from 'y-websocket'
 import { WebSocket } from 'ws'
 import ignore from 'ignore'
 import { applyDiff, merge3, summarizeChange, changedRange, hasConflictMarkers } from './core.js'
+import { fileRoom, decodeUnsafe, scopeForRoom, pathAllowed } from './token.js'
 
 // Never sync these, even if not in .gitignore — secrets and obvious junk. This
 // prevents pushing a teammate's .env / private keys / build output to the room.
@@ -112,15 +113,55 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   reloadIgnores()
   const isIgnored = (relPath) => !!relPath && ig.ignores(relPath)
 
+  // PARENT doc: the manifest (file registry) + all coordination state. Each FILE
+  // lives in its OWN doc, synced at its own room ("<room>␁<path>"). A client only
+  // connects to the file-rooms it loads, so per-path access control (Phase 3) is
+  // possible — Yjs replicates a whole doc to everyone, so isolation must be by
+  // splitting into per-file docs, not by filtering one shared doc.
   const doc = new Y.Doc()
-  const files = doc.getMap('files') // relPath -> Y.Text
+  const manifest = doc.getMap('manifest') // relPath -> 1 (the file registry)
   const board = doc.getMap('board') // relPath -> { by, at, churn, symbols }
   const chat = doc.getArray('chat') // ordered coordination messages { by, kind, at, text }
   const tasks = doc.getMap('tasks') // id -> { id, to, by, text, status, decidedBy, at } directed work
   const owners = doc.getMap('owners') // aiName -> ownerHumanName (who may approve its tasks)
-  const provider = new WebsocketProvider(relay, room, doc, { WebSocketPolyfill: WebSocket, params: token ? { token } : undefined })
+  // disableBc: do NOT sync peer-to-peer over BroadcastChannel. The relay must be
+  // the ONLY path between clients — otherwise two clients on the same machine would
+  // sync directly and bypass the relay's access control (auth, path scope, read-only).
+  const wsOpts = { WebSocketPolyfill: WebSocket, disableBc: true, params: token ? { token } : undefined }
+  const provider = new WebsocketProvider(relay, room, doc, wsOpts)
   provider.awareness.setLocalStateField('user', { name, kind, owner: owner || undefined }) // identity is implicit in the client
   if (kind === 'ai' && owner) owners.set(name, owner) // record who is allowed to approve my tasks
+
+  // One sub-provider + Y.Doc per file, created on demand. `text` is its content.
+  const fileDocs = new Map() // relPath -> { doc, provider, text }
+  function openFile(relPath) {
+    let e = fileDocs.get(relPath)
+    if (e) return e
+    const fdoc = new Y.Doc()
+    const fprovider = new WebsocketProvider(relay, fileRoom(room, relPath), fdoc, wsOpts)
+    const text = fdoc.getText('content')
+    e = { doc: fdoc, provider: fprovider, text }
+    fileDocs.set(relPath, e)
+    text.observe((_ev, txn) => { if (!txn.local) reconcile(relPath, 'remote') }) // remote content edits
+    fprovider.on('sync', (s) => { if (s) reconcile(relPath, 'remote') })          // initial pull
+    return e
+  }
+  function closeFile(relPath) {
+    const e = fileDocs.get(relPath)
+    if (!e) return
+    try { e.provider.destroy() } catch { }
+    try { e.doc.destroy() } catch { }
+    fileDocs.delete(relPath)
+  }
+  const fileText = (relPath) => { const e = fileDocs.get(relPath); return e ? e.text : null }
+
+  // My own path scope, read from my token (for THIS room). Used so I don't even
+  // try to open files I'm not granted — the relay would reject them anyway, but
+  // this avoids the churn and keeps out-of-scope files off my disk entirely.
+  // undefined = no path restriction (open room or whole-room grant).
+  let myPaths
+  if (token) { const pl = decodeUnsafe(token); const sc = pl && scopeForRoom(pl, room); myPaths = sc ? sc.paths : undefined }
+  const canOpen = (relPath) => pathAllowed(myPaths, relPath)
 
   const known = new Set()
   const mtimes = new Map()
@@ -164,12 +205,15 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   function reconcile(relPath, origin = 'local') {
     if (SKIP.has(relPath) || isIgnored(relPath)) return // never sync secrets/ignored files
     const full = path.join(ROOT, relPath)
-    const yt = files.get(relPath)
+    let yt = fileText(relPath)
     const disk = fs.existsSync(full) ? readText(full) : null
     const docText = yt ? yt.toString() : null
     if (disk === null && docText === null) return
     if (docText === null) {
-      const t = new Y.Text(); files.set(relPath, t); t.insert(0, disk)
+      // New LOCAL file: create its per-file doc, seed content, register in manifest.
+      const fe = openFile(relPath)
+      fe.doc.transact(() => applyDiff(fe.text, disk))
+      if (!manifest.has(relPath)) manifest.set(relPath, 1)
       known.add(relPath); bases.set(relPath, disk); forkBases.set(relPath, disk)
       try { mtimes.set(relPath, fs.statSync(full).mtimeMs) } catch { }
       return
@@ -212,7 +256,7 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
       res = merge3(base, disk, docText) // incoming remote change merged into our working copy
     }
 
-    doc.transact(() => applyDiff(yt, res.text))
+    fileDocs.get(relPath).doc.transact(() => applyDiff(yt, res.text))
     if (res.text !== disk) writeToDisk(relPath, res.text)
     known.add(relPath); bases.set(relPath, res.text)
     if (origin === 'local') forkBases.set(relPath, res.text) // we authored this state; it's our new fork
@@ -387,38 +431,32 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
       if (SKIP.has(r)) continue
       let mt
       try { mt = fs.statSync(full).mtimeMs } catch { continue }
-      if (mtimes.get(r) === mt && files.has(r)) continue
+      if (mtimes.get(r) === mt && manifest.has(r)) continue
       if (readText(full) === null) continue
       mtimes.set(r, mt)
       reconcile(r, 'local')
     }
-    const removed = [...known].filter((r) => !diskRel.has(r) && files.has(r))
+    const removed = [...known].filter((r) => !diskRel.has(r) && manifest.has(r))
     if (removed.length) {
-      doc.transact(() => {
-        for (const r of removed) { files.delete(r); known.delete(r); mtimes.delete(r); bases.delete(r); forkBases.delete(r) }
-      })
+      doc.transact(() => { for (const r of removed) manifest.delete(r) })
+      for (const r of removed) { closeFile(r); known.delete(r); mtimes.delete(r); bases.delete(r); forkBases.delete(r) }
     }
   }
 
-  if (syncFiles) files.observeDeep((events, txn) => {
+  // Manifest changes from OTHERS: a new path -> open its file-room (its sync pulls
+  // the content); a removed path -> tear down + delete the local file.
+  if (syncFiles) manifest.observe((ev, txn) => {
     if (txn.local) return
-    for (const ev of events) {
-      if (ev.target === files) {
-        ev.changes.keys.forEach((change, key) => {
-          if (change.action === 'delete') {
-            try { fs.rmSync(path.join(ROOT, key)) } catch { }
-            known.delete(key); bases.delete(key); forkBases.delete(key)
-            log(`[${name}] <- deleted ${key}`)
-          } else {
-            reconcile(key, 'remote')
-          }
-        })
-      } else {
-        for (const [key, yt] of files.entries()) {
-          if (yt === ev.target) { reconcile(key, 'remote'); break }
-        }
+    ev.changes.keys.forEach((change, key) => {
+      if (change.action === 'delete') {
+        closeFile(key)
+        try { fs.rmSync(path.join(ROOT, key)) } catch { }
+        known.delete(key); bases.delete(key); forkBases.delete(key); mtimes.delete(key)
+        log(`[${name}] <- deleted ${key}`)
+      } else if (canOpen(key)) {
+        openFile(key)
       }
-    }
+    })
   })
 
   // INSTANT propagation: fs.watch fires on the actual edit, so changes go out in
@@ -440,13 +478,13 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   provider.on('sync', (s) => {
     if (!s || !syncFiles) return
     writeToDisk(RULES_FILE, HIVE_RULES_TEXT) // the law is always present in the room
-    for (const [key] of files.entries()) reconcile(key, 'remote')
+    for (const key of manifest.keys()) if (canOpen(key)) openFile(key) // connect to every file I'm granted; each file-room's sync pulls its content
     if (board.size) renderBoard()
     if (chat.length) renderChat()
     if (tasks.size) renderTasks()
     renderMembers()
     scan()
-    log(`[${name}] folder sync active on ${ROOT} (room "${room}") as ${kind}. ${files.size} files.`)
+    log(`[${name}] folder sync active on ${ROOT} (room "${room}") as ${kind}. ${manifest.size} files.`)
     if (!scanTimer) {
       startWatch()
       scanTimer = setInterval(scan, watcher ? 2000 : 400) // watch handles fast path; scan is the net
@@ -467,6 +505,7 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
       if (debounce) clearTimeout(debounce)
       if (editingClearTimer) clearTimeout(editingClearTimer)
       try { watcher && watcher.close() } catch { }
+      for (const r of [...fileDocs.keys()]) closeFile(r) // tear down every per-file provider
       try { provider.awareness.setLocalState(null) } catch { } // announce departure now (don't wait for timeout)
       try { provider.destroy() } catch { }
       try { doc.destroy() } catch { }

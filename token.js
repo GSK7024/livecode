@@ -18,6 +18,7 @@
 //   }
 
 import crypto from 'crypto'
+import ignore from 'ignore'
 
 const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const b64urlToBuf = (s) => Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
@@ -67,6 +68,16 @@ export function verify(token, verifyWith = {}, now = Math.floor(Date.now() / 100
   return { ok: true, payload }
 }
 
+// --- room naming for the per-file subdoc model (Phase 2) ---
+// A project is a PARENT room (manifest + coordination) plus one room per file,
+// named `<baseRoom>␁<path>`. Encoding the path in the room name lets the relay
+// authorize per-path (Phase 3) and lets a client connect only to the files it
+// may load. FILE_SEP is a control char that never appears in room ids or paths.
+export const FILE_SEP = ''
+export const fileRoom = (baseRoom, relPath) => baseRoom + FILE_SEP + relPath
+export const baseRoomOf = (room) => { const i = room.indexOf(FILE_SEP); return i < 0 ? room : room.slice(0, i) }
+export const pathOf = (room) => { const i = room.indexOf(FILE_SEP); return i < 0 ? null : room.slice(i + 1) }
+
 // Does a scope's room pattern authorize this room? Supports exact, "*" (all),
 // and a trailing "*" prefix wildcard (e.g. "acme/*" matches "acme/api").
 export function roomMatches(pattern, room) {
@@ -80,4 +91,26 @@ export function roomMatches(pattern, room) {
 export function scopeForRoom(payload, room) {
   const scopes = Array.isArray(payload && payload.scopes) ? payload.scopes : []
   return scopes.find((sc) => roomMatches(sc.room, room)) || null
+}
+
+// Phase 3: is a file path allowed by a scope's path globs? Gitignore-style globs
+// (via the `ignore` lib): positive patterns grant subtrees, "!"-prefixed patterns
+// deny. No globs (or none given) = the whole room is allowed (Phase-2 behavior).
+//   pathAllowed(["src/**", "!**/*.env"], "src/app.js") -> true
+//   pathAllowed(["src/**"],            "secrets/k.txt") -> false
+export function pathAllowed(globs, relPath) {
+  if (!Array.isArray(globs) || globs.length === 0) return true
+  const pos = [], neg = []
+  for (const g of globs) { if (typeof g !== 'string' || !g) continue; if (g[0] === '!') neg.push(g.slice(1)); else pos.push(g) }
+  const matches = (pats) => pats.length > 0 && ignore().add(pats).ignores(relPath)
+  const inAllow = pos.length === 0 ? true : matches(pos)
+  return inAllow && !matches(neg)
+}
+
+// Read a token's payload WITHOUT verifying — for a client to inspect its OWN grant
+// (e.g. which paths it may open) for UX. NEVER use for access decisions; the relay
+// is the enforcer (it verifies the signature).
+export function decodeUnsafe(token) {
+  try { return JSON.parse(Buffer.from(String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')) }
+  catch { return null }
 }
