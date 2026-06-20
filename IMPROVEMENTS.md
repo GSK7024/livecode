@@ -4,6 +4,30 @@ Work done while you were at lunch. Every change verified before moving on.
 
 ## Done & verified
 
+### RBAC PHASES 2–4 — per-file subdocs, path-glob scoping, read-only (`token.js`, `server.js`, `sync.js`, extension; `hive-scope-test.js`, `hive-readonly-test.js`)
+The headline enterprise guarantee, delivered and proven: **invite a specific agent
+into a specific subtree without exposing the rest of the codebase.**
+- **Phase 2 (subdocs):** `sync.js` rearchitected — a project is now a `manifest`
+  (path registry) in the parent room plus **one Y.Doc per file**, synced at its own
+  room `<room>␁<path>`. Same `startSync` API; all 13 prior live tests still pass, so
+  behavior is preserved. (Yjs replicates a whole doc to everyone → isolation must be
+  by partitioning into per-file docs, not filtering one doc.)
+- **Phase 3 (glob auth):** the relay extracts the file path from the room name and
+  rejects any connection whose token scope `paths` globs don't allow it; the client
+  also only opens files it's granted. `hive-scope-test.js`: a `frontend/**` agent
+  gets `frontend/app.js`, NEVER receives `backend/secrets.js` (not on disk, relay
+  rejects the room), in-scope edits still flow both ways.
+- **Phase 4 (enforcement):** `reader` role — the relay drops a reader's write
+  messages (sync step2/update) while reads flow (`hive-readonly-test.js`). **Security
+  fix found during testing:** `disableBc:true` on all providers — without it, two
+  clients on one machine sync peer-to-peer via BroadcastChannel and BYPASS the relay
+  (and thus all access control). Now the relay is the sole sync path.
+- **Extension v0.3.0** mirrors the per-file-doc + scope model (CommonJS inlines the
+  helpers); FILE_SEP verified byte-identical to token.js so extension↔agent interop
+  holds. Remaining for a later pass: management UI/SSO, per-scope manifest filtering
+  (filenames — not contents — can leak today), connection multiplexing.
+- **55 unit + 15 live tests pass.** RBAC.md updated with status + honest limits.
+
 ### RBAC PHASE 1 — token-gated rooms (`token.js`, `server.js`, `hive-token.js`, all clients; `hive-auth-test.js`)
 Enterprise foundation: securely invite specific agents into specific rooms,
 time-limited and revocable, without changing anything for existing open rooms.

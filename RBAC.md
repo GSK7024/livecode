@@ -25,8 +25,8 @@ A token is a compact JWT (JWS). Claims:
   "iat": 1710000000, "exp": 1710600000, "jti": "jti-…"   // jti enables revocation
 }
 ```
-`paths` is stored now and **enforced in Phase 3** (see roadmap). In Phase 1 a token
-grants room-level access.
+`paths` are **enforced**: the relay rejects a connection to any file outside the
+scope's globs (see Status below). Omit `paths` to grant the whole room.
 
 ## Running a secured relay
 Auth is **opt-in**. By default the relay is `open` (anyone with the room id joins —
@@ -75,28 +75,35 @@ Open rooms need no token; existing setups keep working.
   `HIVE_REVOKED_JTIS`. The relay re-reads the file on each connect.
 - Every admit/reject is audited (`{ts, event, room, identity, role|reason}`).
 
-## What Phase 1 does and does NOT do (honest scope)
-**Does:** authenticate every connection on a secured relay; admit only valid,
-unexpired, unrevoked tokens whose scope authorizes the room; reject everything else
-at the upgrade; record an audit trail; revoke; expire; verify identity from the
-token (not just self-asserted awareness). Backward compatible (open mode default).
+## Status by phase
+- **Phase 1 — auth'd relay ✅** authenticate every connection; admit only valid,
+  unexpired, unrevoked tokens whose scope authorizes the room; reject at the
+  upgrade; audit; revoke; expire; identity from the token. Open mode default.
+- **Phase 2 — subdocuments ✅** a project is a *manifest* (path registry) in the
+  parent room plus one Yjs doc **per file**, synced at its own room `<room>␁<path>`,
+  behind the same `startSync` API. (Yjs replicates a whole doc to every client, so
+  isolation must be by partitioning into per-file docs, not by filtering one doc.)
+- **Phase 3 — glob authorization ✅** the relay authorizes each file-room against
+  the token scope's `paths` globs; a scoped client only connects to (and only
+  writes to disk) the files it's granted. **This is the "don't expose the whole
+  codebase" guarantee** — proven in `hive-scope-test.js`: a `frontend/**` agent
+  never receives `backend/secrets.js`, and the relay rejects that file-room.
+- **Phase 4 — enforcement ✅ (core) / control plane ▢ (remaining)**
+  - ✅ **read-only roles** — the relay drops a `reader`'s write messages (sync
+    step2/update); reads still flow (`hive-readonly-test.js`).
+  - ✅ **relay is the only path** — `disableBc` stops same-machine clients from
+    syncing peer-to-peer over BroadcastChannel and bypassing access control.
+  - ▢ **remaining:** a web UI/API for orgs/repos/grants, SSO/SCIM, hosted RS256
+    issuer, audit export. (Tokens are minted by the `hive-token` CLI today.)
 
-**Does NOT yet:** enforce path globs (a token holder reaches the **whole room** it's
-granted), enforce read-only vs write, or provide a management UI. Those are below.
-
-## Roadmap to per-path scoping
-1. **Phase 2 — subdocuments.** Re-architect `sync.js` so a project is a *manifest*
-   (path → subdoc id) plus one Yjs **subdoc per file**, behind today's API. This is
-   the prerequisite for per-path access: a client can load only the subdocs it's
-   allowed to. (Yjs replicates a whole doc to every client, so isolation must be by
-   partitioning into subdocs — not by filtering one shared doc.)
-3. **Phase 3 — glob authorization.** The relay authorizes each subdoc load against
-   the token's `paths` globs, and **filters the manifest** so a scoped agent doesn't
-   even see the names of files outside its scope. *This is the full "don't expose
-   the whole codebase" guarantee.*
-4. **Phase 4 — enforcement + control plane.** Drop writes from `reader`s; per-scope
-   write; a web UI/API for orgs/repos/grants; SSO/SCIM; hosted RS256 issuer; audit
-   export.
+### Known limits (honest)
+- **Filenames, not contents, can leak:** the parent `manifest` lists every path, so
+  a scoped client could read the *names* of out-of-scope files (never their
+  **contents** — those live in per-file rooms it can't open, and are never written
+  to its disk). Per-scope manifest filtering is a future refinement.
+- A `reader`'s local edits stay on its own disk (they just never reach the relay).
+- One WebSocket connection per open file — fine for typical projects; connection
+  multiplexing is a future optimization for very large trees.
 
 RBAC composes with the task gate: **RBAC decides whether an agent may see/touch a
 scope; the owner-approval gate decides whether a specific task runs.**

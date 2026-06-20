@@ -177,10 +177,26 @@ function leaveSession() {
   pushState()
 }
 
+// --- per-file-doc model + access helpers (mirrors token.js / sync.js) ---
+const FILE_SEP = ''
+const fileRoom = (baseRoom, relPath) => baseRoom + FILE_SEP + relPath
+function decodeUnsafe(tok) {
+  try { return JSON.parse(Buffer.from(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')) } catch { return null }
+}
+function roomMatches(pattern, rm) { if (!pattern) return false; if (pattern === '*' || pattern === rm) return true; return pattern.endsWith('*') && rm.startsWith(pattern.slice(0, -1)) }
+function scopeForRoom(payload, rm) { const s = (payload && payload.scopes) || []; return s.find((sc) => roomMatches(sc.room, rm)) || null }
+function pathAllowed(globs, relPath) {
+  if (!Array.isArray(globs) || globs.length === 0) return true
+  const pos = [], neg = []
+  for (const g of globs) { if (typeof g !== 'string' || !g) continue; if (g[0] === '!') neg.push(g.slice(1)); else pos.push(g) }
+  const matches = (pats) => pats.length > 0 && ignore().add(pats).ignores(relPath)
+  return (pos.length === 0 || matches(pos)) && !matches(neg)
+}
+
 // --- the sync engine (whole-folder, disk-level, mtime-optimized) ---
 function start(root, room, relay) {
   const doc = new Y.Doc()
-  const files = doc.getMap('files')
+  const manifest = doc.getMap('manifest') // relPath -> 1 (file registry); each file is its own subdoc
   const board = doc.getMap('board') // relPath -> { by, at, churn, symbols } (auto-logged rewrites)
   const chat = doc.getArray('chat') // ordered messages { by, kind, at, text }
   const tasks = doc.getMap('tasks') // id -> { id, to, by, text, status, decidedBy, at }
@@ -188,7 +204,10 @@ function start(root, room, relay) {
   const BOARD_FILE = 'HIVE_BOARD.md' // generated locally from `board`; never synced as a file
   const useRelay = relay || relayUrl()
   const tokenCfg = (vscode.workspace.getConfiguration('hivecode').get('token') || '').trim()
-  const provider = new WebsocketProvider(useRelay, room, doc, { WebSocketPolyfill: WebSocket, params: tokenCfg ? { token: tokenCfg } : undefined })
+  // disableBc: relay is the ONLY sync path (else same-machine peers would bypass
+  // the relay's access control via BroadcastChannel).
+  const wsOpts = { WebSocketPolyfill: WebSocket, disableBc: true, params: tokenCfg ? { token: tokenCfg } : undefined }
+  const provider = new WebsocketProvider(useRelay, room, doc, wsOpts)
   // Unique per window: doc.clientID is distinct even for two windows on one
   // machine (machineId was identical → both showed the same id). A configured
   // displayName wins so members read as "Jeevan"/"Friend" instead of an id.
@@ -202,6 +221,28 @@ function start(root, room, relay) {
   const forkBases = new Map() // path -> FORK POINT: what THIS author last saw/authored.
   // Advances only on local authorship / first adoption — NOT when a remote change
   // lands on disk. Stops a stale local rewrite from silently deleting another's work.
+
+  // One sub-provider + Y.Doc per file (synced at "<room>␁<path>"), created on demand.
+  const fileDocs = new Map() // relPath -> { doc, provider, text }
+  function openFile(r) {
+    let e = fileDocs.get(r)
+    if (e) return e
+    const fdoc = new Y.Doc()
+    const fprovider = new WebsocketProvider(useRelay, fileRoom(room, r), fdoc, wsOpts)
+    const text = fdoc.getText('content')
+    e = { doc: fdoc, provider: fprovider, text }
+    fileDocs.set(r, e)
+    text.observe((_ev, txn) => { if (!txn.local) reconcile(r, 'remote') })
+    fprovider.on('sync', (s) => { if (s) reconcile(r, 'remote') })
+    return e
+  }
+  function closeFile(r) { const e = fileDocs.get(r); if (!e) return; try { e.provider.destroy() } catch {} try { e.doc.destroy() } catch {} fileDocs.delete(r) }
+  const fileText = (r) => { const e = fileDocs.get(r); return e ? e.text : null }
+  // This window's own path scope (from its token), so it only opens files it may.
+  let myPaths
+  if (tokenCfg) { const pl = decodeUnsafe(tokenCfg); const sc = pl && scopeForRoom(pl, room); myPaths = sc ? sc.paths : undefined }
+  const canOpen = (r) => pathAllowed(myPaths, r)
+
   const seenMembers = new Set()
   // --- live activity: broadcast which file this window is editing + warn on co-editing ---
   const EDIT_FRESH_MS = 15000
@@ -326,12 +367,14 @@ function start(root, room, relay) {
   function reconcile(r, origin = 'local') {
     if (SKIP.has(r) || isIgnored(r)) return // never sync secrets/ignored/coordination files
     const full = path.join(root, r)
-    const yt = files.get(r)
+    const yt = fileText(r)
     const disk = fs.existsSync(full) ? readText(full) : null
     const docText = yt ? yt.toString() : null
     if (disk === null && docText === null) return
     if (docText === null) {
-      const t = new Y.Text(); files.set(r, t); t.insert(0, disk)
+      const fe = openFile(r)
+      fe.doc.transact(() => applyDiff(fe.text, disk))
+      if (!manifest.has(r)) manifest.set(r, 1)
       known.add(r); bases.set(r, disk); forkBases.set(r, disk)
       try { mtimes.set(r, fs.statSync(full).mtimeMs) } catch {}
       return
@@ -362,7 +405,7 @@ function start(root, room, relay) {
     } else {
       res = merge3(base, disk, docText)
     }
-    doc.transact(() => applyDiff(yt, res.text)) // local txn -> observer ignores
+    fileDocs.get(r).doc.transact(() => applyDiff(yt, res.text)) // file-doc txn -> its observer ignores
     if (res.text !== disk) writeToDisk(r, res.text)
     known.add(r); bases.set(r, res.text)
     if (origin === 'local') forkBases.set(r, res.text)
@@ -459,33 +502,31 @@ function start(root, room, relay) {
       if (SKIP.has(r)) continue // generated/coordination files; don't sync
       let mt
       try { mt = fs.statSync(full).mtimeMs } catch { continue }
-      if (mtimes.get(r) === mt && files.has(r)) continue
+      if (mtimes.get(r) === mt && manifest.has(r)) continue
       if (readText(full) === null) continue
       mtimes.set(r, mt)
       reconcile(r, 'local') // 3-way merge instead of blind overwrite
     }
-    const removed = [...known].filter((r) => !onDisk.has(r) && files.has(r))
+    const removed = [...known].filter((r) => !onDisk.has(r) && manifest.has(r))
     if (removed.length) {
-      doc.transact(() => {
-        for (const r of removed) { files.delete(r); known.delete(r); mtimes.delete(r); bases.delete(r); forkBases.delete(r) }
-      })
+      doc.transact(() => { for (const r of removed) manifest.delete(r) })
+      for (const r of removed) { closeFile(r); known.delete(r); mtimes.delete(r); bases.delete(r); forkBases.delete(r) }
     }
   }
 
-  files.observeDeep((events, txn) => {
+  // Manifest changes from OTHERS: new path -> open its file-room (if in scope);
+  // removed path -> tear down + delete locally.
+  manifest.observe((ev, txn) => {
     if (txn.local) return
-    for (const ev of events) {
-      if (ev.target === files) {
-        ev.changes.keys.forEach((change, key) => {
-          if (change.action === 'delete') { try { fs.rmSync(path.join(root, key)) } catch {}; known.delete(key); bases.delete(key); forkBases.delete(key); logActivity(`deleted ${key}`) }
-          else reconcile(key, 'remote') // merge remote change with any local edits
-        })
-      } else {
-        for (const [key, yt] of files.entries()) {
-          if (yt === ev.target) { reconcile(key, 'remote'); break }
-        }
+    ev.changes.keys.forEach((change, key) => {
+      if (change.action === 'delete') {
+        closeFile(key); try { fs.rmSync(path.join(root, key)) } catch {}
+        known.delete(key); bases.delete(key); forkBases.delete(key); mtimes.delete(key)
+        logActivity(`deleted ${key}`)
+      } else if (canOpen(key)) {
+        openFile(key)
       }
-    }
+    })
   })
 
   function renderMembers() {
@@ -512,7 +553,7 @@ function start(root, room, relay) {
   provider.on('sync', (s) => {
     if (!s) return
     writeToDisk('HIVE_RULES.md', HIVE_RULES_TEXT) // the law is always present in the room
-    for (const [key] of files.entries()) reconcile(key, 'remote') // pull + merge against local
+    for (const key of manifest.keys()) if (canOpen(key)) openFile(key) // connect to every file I'm granted
     if (board.size) renderBoard() // surface rewrites logged before we joined
     if (chat.length) renderChat()
     if (tasks.size) renderTasks()
@@ -523,7 +564,7 @@ function start(root, room, relay) {
   })
 
   // expose chat/task actions to the panel handler
-  session = { doc, provider, root, scanTimer: null, room, relay: useRelay, me, chat, tasks, owners, say, assign, decide, stopActivity: () => { if (editingClearTimer) clearTimeout(editingClearTimer) } }
+  session = { doc, provider, root, scanTimer: null, room, relay: useRelay, me, chat, tasks, owners, say, assign, decide, stopActivity: () => { if (editingClearTimer) clearTimeout(editingClearTimer); for (const r of [...fileDocs.keys()]) closeFile(r) } }
   pushState()
 }
 
