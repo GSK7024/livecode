@@ -171,6 +171,7 @@
     <span class="chip" id="roomChip"></span>
     <span class="chip" id="youChip"></span>
     <span class="live"><span class="dot" id="dot"></span><span id="connState">connecting…</span> · <span id="memCount">0</span> online</span>
+    <button class="iconbtn" id="refresh" title="Refresh now">⟳</button>
     <button class="iconbtn" id="theme" title="Light / dark">🌙</button>
     <button class="ghost" id="leave">Leave</button>
   </header>
@@ -240,13 +241,24 @@ async function connect(raw){
   $('connState').textContent='connecting…'
   timer=setTimeout(()=>{if(!$('dot').classList.contains('on'))$('connState').textContent='can’t reach room'},9000)
   render()
+  // Belt-and-suspenders: besides the live CRDT observers above, sweep every second
+  // so the panel can never go stale (covers any missed update / late sync). render()
+  // is signature-gated, so an unchanged second touches no DOM (no flicker).
+  if(window._tick)clearInterval(window._tick)
+  window._tick=setInterval(render,1000)
 }
 
 function members(){const ctrls=doc.getMap('controls').toJSON(),byName=new Map();for(const s of provider.awareness.getStates().values()){const u=s&&s.user;if(!u||!u.name)continue;byName.set(u.name,{...(byName.get(u.name)||{}),...u,paused:(ctrls[u.name]||{}).state==='paused'})}return[...byName.values()]}
 
+let _rsig=''
 function render(){
-  if(!provider)return
+  if(!provider||!window._h)return
   const mem=members()
+  // Skip the DOM work when nothing changed (so the 1s sweep never flickers or drops
+  // a text selection). Signature = everything the panel shows.
+  const chatArr=window._h.chat.toArray(),tasksObj=window._h.tasks.toJSON(),boardObj=doc.getMap('board').toJSON()
+  const sig=JSON.stringify([mem.map(m=>[m.name,m.kind,m.paused,efile(m.editing)]),chatArr.length,(chatArr[chatArr.length-1]||{}).at,Object.values(tasksObj).map(t=>[t.id,t.status]),Object.keys(boardObj).length])
+  if(sig===_rsig)return; _rsig=sig
   $('memCount').textContent=mem.length;$('mc').textContent=mem.length
   $('members').innerHTML=mem.length?mem.map(m=>{const ai=m.kind==='ai',ef=efile(m.editing)
     const st=m.paused?'paused':ef?'editing':'online'
@@ -286,7 +298,8 @@ $('chatInput').addEventListener('keydown',(e)=>{if(e.key==='Enter')sendChat()})
 $('connect').addEventListener('click',()=>connect($('link').value.trim()))
 $('link').addEventListener('keydown',(e)=>{if(e.key==='Enter')connect($('link').value.trim())})
 $('link').addEventListener('input',()=>{if($('uname').value.trim())return;const c=decodeJwt(parseLink(sanitize($('link').value)).token);if(c&&c.name)$('uname').value=c.name})
-$('leave').addEventListener('click',()=>{try{provider&&provider.destroy()}catch{};location.hash='';location.reload()})
+$('refresh').addEventListener('click',()=>{_rsig='';render()})
+$('leave').addEventListener('click',()=>{try{if(window._tick)clearInterval(window._tick)}catch{};try{provider&&provider.destroy()}catch{};location.hash='';location.reload()})
 const applyTheme=(t)=>{document.body.classList.toggle('light',t==='light');$('theme').textContent=t==='light'?'🌙':'☀️'}
 let theme=localStorage.getItem('hc-theme')||'dark';applyTheme(theme)
 $('theme').addEventListener('click',()=>{theme=theme==='light'?'dark':'light';localStorage.setItem('hc-theme',theme);applyTheme(theme)})

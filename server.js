@@ -229,7 +229,10 @@ const server = http.createServer((req, res) => {
       try {
         const body = fs.readFileSync(path.join(__dirname, 'public', file))
         const ext = file.slice(file.lastIndexOf('.'))
-        res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=300' })
+        // HTML is the app shell — keep it fresh (60s) so deploys land fast; static
+        // image assets can cache longer.
+        const maxAge = ext === '.html' ? 60 : 86400
+        res.writeHead(200, { 'Content-Type': TYPES[ext] || 'application/octet-stream', 'Cache-Control': `public, max-age=${maxAge}` })
         return res.end(body)
       } catch { /* fall through to the plain status text */ }
     }
