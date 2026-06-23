@@ -257,7 +257,9 @@ function render(){
   // Skip the DOM work when nothing changed (so the 1s sweep never flickers or drops
   // a text selection). Signature = everything the panel shows.
   const chatArr=window._h.chat.toArray(),tasksObj=window._h.tasks.toJSON(),boardObj=doc.getMap('board').toJSON()
-  const sig=JSON.stringify([mem.map(m=>[m.name,m.kind,m.paused,efile(m.editing)]),chatArr.length,(chatArr[chatArr.length-1]||{}).at,Object.values(tasksObj).map(t=>[t.id,t.status]),Object.keys(boardObj).length])
+  // board signature uses each file's last-change stamp (ts numeric, or at string) so
+  // re-editing the SAME file is detected — not just when the file COUNT changes.
+  const sig=JSON.stringify([mem.map(m=>[m.name,m.kind,m.paused,efile(m.editing)]),chatArr.length,(chatArr[chatArr.length-1]||{}).at,Object.values(tasksObj).map(t=>[t.id,t.status]),Object.entries(boardObj).map(([f,v])=>[f,v.ts||v.at])])
   if(sig===_rsig)return; _rsig=sig
   $('memCount').textContent=mem.length;$('mc').textContent=mem.length
   $('members').innerHTML=mem.length?mem.map(m=>{const ai=m.kind==='ai',ef=efile(m.editing)
@@ -279,9 +281,10 @@ function render(){
     const acts=s==='pending'?`<div class="tact"><button class="ok" data-tact="accept" data-id="${esc(t.id)}">Approve</button><button class="bad" data-tact="deny" data-id="${esc(t.id)}">Deny</button></div>`:''
     return `<div class="task"><div class="tflow"><b>${esc(t.by||'?')}</b> → <b>${esc(t.to||'?')}</b></div><div class="ttext">${esc(t.text)}</div><span class="tst ${s}">${esc(s)}</span>${acts}</div>`}).join(''):'<div class="empty">No tasks yet.</div>'
 
-  const board=Object.entries(doc.getMap('board').toJSON()).map(([file,v])=>({file,...v})).sort((a,b)=>(b.at||0)-(a.at||0)).slice(0,50)
+  // newest first — sort by numeric ts when present, else lexically by the HH:MM:SS string.
+  const board=Object.entries(boardObj).map(([file,v])=>({file,...v})).sort((a,b)=>(b.ts||0)-(a.ts||0)||String(b.at||'').localeCompare(String(a.at||''))).slice(0,50)
   $('ac').textContent=board.length
-  $('activity').innerHTML=board.length?board.map(b=>`<div class="feed"><div class="fmeta"><b>${esc(b.by||'?')}</b><span>${ago(b.at)}</span><span>${esc(b.churn||'')}</span></div><div class="ffile">${esc(b.file)}</div></div>`).join(''):'<div class="empty">No activity yet.</div>'
+  $('activity').innerHTML=board.length?board.map(b=>`<div class="feed"><div class="fmeta"><b>${esc(b.by||'?')}</b><span>${esc(b.at||'')}</span><span>${b.rewrite?'rewrote':'edited'} · ${esc(b.churn||'')}</span></div><div class="ffile">${esc(b.file)}</div></div>`).join(''):'<div class="empty">No activity yet.</div>'
 }
 
 document.addEventListener('click',(e)=>{

@@ -333,21 +333,27 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   }
 
   const fmtTime = () => new Date().toTimeString().slice(0, 8)
+  // Log file activity to the shared board: EVERY meaningful edit (so the live
+  // activity feed reflects ongoing work), tagged with whether it was a full-file
+  // `rewrite` and a numeric `ts` for ordering. HIVE_BOARD.md stays rewrites-only
+  // (see renderBoard) so the "read before editing" coordination doc isn't noisy.
   function noteIfRewrite(relPath, base, next) {
-    if (!base) return
+    if (base == null || base === next) return
     const s = summarizeChange(base, next)
-    if (!s.isRewrite) return
-    board.set(relPath, { by: name, at: fmtTime(), churn: `${s.changedLines}/${s.totalLines} lines`, symbols: s.symbols })
-    log(`[${name}] board: logged REWRITE of ${relPath} (${s.changedLines}/${s.totalLines} lines; touched ${s.symbols.join(', ') || 'n/a'})`)
+    if (!s.changedLines) return
+    board.set(relPath, { by: name, at: fmtTime(), ts: Date.now(), churn: `${s.changedLines}/${s.totalLines} lines`, symbols: s.symbols, rewrite: s.isRewrite })
+    if (s.isRewrite) log(`[${name}] board: logged REWRITE of ${relPath} (${s.changedLines}/${s.totalLines} lines; touched ${s.symbols.join(', ') || 'n/a'})`)
   }
   function renderBoard() {
+    // HIVE_BOARD.md is the coordination doc: full-file REWRITES only (small edits
+    // live in the activity feed via the board map, but don't clutter this file).
+    const entries = [...board.entries()].map(([file, e]) => ({ file, ...e })).filter((e) => e.rewrite).sort((a, b) => (b.ts || 0) - (a.ts || 0) || (a.at < b.at ? 1 : -1))
+    if (!entries.length) return // no rewrites yet — don't create/clutter the board file
     const out = [
       '# Hive Board — recent full-file rewrites (auto-logged by Hivecode).',
       '# READ THIS before editing a file someone just rewrote, then re-read that file.',
       '',
     ]
-    const entries = [...board.entries()].map(([file, e]) => ({ file, ...e })).sort((a, b) => (a.at < b.at ? 1 : -1))
-    if (!entries.length) out.push('(no rewrites yet — patches and small edits are not listed)')
     for (const e of entries) out.push(`- ${e.at}  ${e.by} rewrote \`${e.file}\` (${e.churn}) — touched: ${(e.symbols || []).join(', ') || 'n/a'}`)
     writeToDisk(BOARD_FILE, out.join('\n') + '\n')
   }

@@ -841,21 +841,25 @@ function start(root, room, relay, linkToken) {
   }
   // AUTO-BOARD: a local wholesale rewrite is recorded for everyone — the agent
   // doesn't have to remember; the sync layer sees the diff and logs it.
+  // Log EVERY meaningful edit to the board (so the live activity feed reflects
+  // ongoing work), with a `rewrite` flag + numeric `ts` for ordering.
   function noteIfRewrite(r, base, next) {
-    if (!base) return
+    if (base == null || base === next) return
     const s = summarizeChange(base, next)
-    if (!s.isRewrite) return
-    board.set(r, { by: me, at: new Date().toTimeString().slice(0, 8), churn: `${s.changedLines}/${s.totalLines} lines`, symbols: s.symbols })
-    logActivity(`REWRITE: ${me} rewrote ${r} (${s.changedLines}/${s.totalLines} lines; touched ${s.symbols.join(', ') || 'n/a'})`)
+    if (!s.changedLines) return
+    board.set(r, { by: me, at: new Date().toTimeString().slice(0, 8), ts: Date.now(), churn: `${s.changedLines}/${s.totalLines} lines`, symbols: s.symbols, rewrite: s.isRewrite })
+    if (s.isRewrite) logActivity(`REWRITE: ${me} rewrote ${r} (${s.changedLines}/${s.totalLines} lines; touched ${s.symbols.join(', ') || 'n/a'})`)
   }
   function renderBoard() {
+    // HIVE_BOARD.md = full-file REWRITES only (small edits show in the live activity
+    // feed via the board map, but don't clutter this coordination file).
+    const entries = [...board.entries()].map(([file, e]) => ({ file, ...e })).filter((e) => e.rewrite).sort((a, b) => (b.ts || 0) - (a.ts || 0) || (a.at < b.at ? 1 : -1))
+    if (!entries.length) return
     const out = [
       '# Hive Board — recent full-file rewrites (auto-logged by Hivecode).',
       '# READ THIS before editing a file someone just rewrote, then re-read that file.',
       '',
     ]
-    const entries = [...board.entries()].map(([file, e]) => ({ file, ...e })).sort((a, b) => (a.at < b.at ? 1 : -1))
-    if (!entries.length) out.push('(no rewrites yet — patches and small edits are not listed)')
     for (const e of entries) out.push(`- ${e.at}  ${e.by} rewrote \`${e.file}\` (${e.churn}) — touched: ${(e.symbols || []).join(', ') || 'n/a'}`)
     writeToDisk(BOARD_FILE, out.join('\n') + '\n')
   }
