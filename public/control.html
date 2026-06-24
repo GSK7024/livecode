@@ -328,7 +328,11 @@ $('leave').addEventListener('click',()=>{try{if(window._tick)clearInterval(windo
 const applyTheme=(t)=>{document.body.classList.toggle('light',t==='light');$('theme').textContent=t==='light'?'🌙':'☀️'}
 let theme=localStorage.getItem('hc-theme')||'dark';applyTheme(theme)
 $('theme').addEventListener('click',()=>{theme=theme==='light'?'dark':'light';localStorage.setItem('hc-theme',theme);applyTheme(theme)})
-$('uname').value=$('uname').value||localStorage.getItem('hc-name')||''
+// Name priority: ?name= baked into the link by the extension (so you join as the
+// SAME person as your editor) > a name you saved before > the field.
+let _qName='';try{_qName=(new URLSearchParams(location.search).get('name')||'').trim()}catch{}
+if(_qName){try{localStorage.setItem('hc-name',_qName)}catch{}}
+$('uname').value=_qName||$('uname').value||localStorage.getItem('hc-name')||''
 const h=sanitize(decodeURIComponent(location.hash.slice(1)))
 if(h&&h.includes('|')){$('link').value=h;if($('uname').value.trim())connect(h);else{err('Pick the name the crew should see, then Join.');$('uname').focus()}}
 </script>

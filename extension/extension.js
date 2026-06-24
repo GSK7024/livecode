@@ -191,7 +191,10 @@ function controlRoomUrl() {
     ? `${session.relay}|${session.room}|${session.ownerToken}`
     : `${session.relay}|${session.room}`
   const httpHost = session.relay.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-  return `${httpHost}/control#${link}`
+  // Carry YOUR name (?name=) so the browser joins as the SAME person as the editor —
+  // one member, not two. The browser reads it, uses it, and remembers it.
+  const nm = session.me ? `?name=${encodeURIComponent(session.me)}` : ''
+  return `${httpHost}/control${nm}#${link}`
 }
 
 // One-click: open the browser Control Room already connected to this room, or copy
