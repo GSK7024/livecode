@@ -142,6 +142,12 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'how many recent messages (default 30)' } } } },
   { name: 'hive_read_board', description: 'Read recent whole-file rewrites (who rewrote what, which symbols). Read this before editing a file — if it was just rewritten, re-read the file first.',
     inputSchema: { type: 'object', properties: {} } },
+  { name: 'hive_claim', description: 'CLAIM a file (or region) BEFORE you edit it, so other agents flow around you instead of colliding. Returns whether you got it — if false, someone else holds it: work on something else. Claims auto-expire, so call hive_release when done (or it frees itself).',
+    inputSchema: { type: 'object', properties: { region: { type: 'string', description: 'the file path (or region id) you want to edit' }, intent: { type: 'string', description: 'short note on what you intend to do' } }, required: ['region'] } },
+  { name: 'hive_release', description: 'Release a file/region you claimed, so other agents can take it. Call this when you finish editing it.',
+    inputSchema: { type: 'object', properties: { region: { type: 'string', description: 'the file path (or region id) to release' } }, required: ['region'] } },
+  { name: 'hive_claims', description: 'See what every agent is currently working on (the live claim board). Read this to pick open work and avoid taken regions.',
+    inputSchema: { type: 'object', properties: {} } },
   { name: 'hive_members', description: 'List who is currently in the room (humans and AI agents).', inputSchema: { type: 'object', properties: {} } },
   { name: 'hive_status', description: 'Show the current session (room, relay, folder, name).', inputSchema: { type: 'object', properties: {} } },
   { name: 'hive_leave', description: 'Leave the room and stop syncing.', inputSchema: { type: 'object', properties: {} } },
@@ -186,6 +192,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'hive_approve': { const r = requireSession().hive.decide(String(args.id), true); return r.ok ? text(`approved ${args.id}`) : err(r.error) }
       case 'hive_deny': { const r = requireSession().hive.decide(String(args.id), false); return r.ok ? text(`denied ${args.id}`) : err(r.error) }
       case 'hive_complete': { const r = requireSession().hive.complete(String(args.id), String(args.note || '')); return r.ok ? text(`completed ${args.id}`) : err(r.error) }
+      case 'hive_claim': {
+        const region = String(args.region || ''); if (!region) return err('need a region (file path)')
+        const got = requireSession().hive.claim(region, String(args.intent || 'edit'))
+        if (got) return text(`claimed ${region} — it's yours. Edit it, then call hive_release.`)
+        const c = requireSession().hive.senseClaim(region)
+        return text(`could NOT claim ${region}${c ? ` — held by ${c.by}${c.intent ? ` (${c.intent})` : ''}` : ''}. Work on something else; check hive_claims for open files.`)
+      }
+      case 'hive_release': { const region = String(args.region || ''); if (!region) return err('need a region'); requireSession().hive.release(region); return text(`released ${region}`) }
+      case 'hive_claims': { const b = requireSession().hive.claimsBoard(); return text(b.length ? b.map((c) => `${c.region} — ${c.by}${c.intent ? ` (${c.intent})` : ''}`).join('\n') : '(nothing claimed right now — all open)') }
       case 'hive_members': { const now = Date.now(); return text(requireSession().hive.members().map((m) => `${m.name} (${m.kind})${m.editing && now - m.editing.at < 15000 ? ` — editing ${m.editing.file}` : ''}`).join('\n') || '(none)') }
       case 'hive_status': { const s = requireSession(); return text({ room: s.room, relay: s.relay, dir: s.dir, name: s.name }) }
       case 'hive_leave': { requireSession().hive.stop(); session = null; return text('left the room') }

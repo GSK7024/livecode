@@ -17,6 +17,9 @@ const Y = require('yjs')
 const { WebsocketProvider } = require('y-websocket')
 const { WebSocket } = require('ws')
 const ignore = require('ignore')
+// ICR — structure/intent-aware merge (optional; falls back to line merge if unavailable).
+let icrlib = null
+try { icrlib = require('./icr.cjs') } catch (e) { /* ICR optional — extension works without it */ }
 
 const IGNORE = new Set(['node_modules', '.git', '.vscode'])
 const MAX_BYTES = 1_000_000
@@ -854,12 +857,37 @@ function start(root, room, relay, linkToken) {
     const out = [...b.slice(0, start), '<<<<<<< local (yours)', ...mineBlock, '=======', ...theirsBlock, '>>>>>>> incoming (theirs)', ...b.slice(end)]
     return { text: out.join('\n'), conflict: true }
   }
+  // ICR-aware merge: for files ICR understands, a clean structural merge supplies the
+  // bytes (finer-grained merges + automatic rename fix-ups, convergence-proven); the line
+  // merge above covers conflicts, fallbacks, other languages, and any ICR error. When ICR
+  // sees a meaning-level problem the line merge can't (a dangling reference / clash), it
+  // keeps the safe text but attaches an icrWarning.
+  function describeConflicts(cs) {
+    return (cs || []).map((c) =>
+      c.startsWith('ref:') ? `'${c.slice(4)}' was removed or renamed but is still used`
+        : c.startsWith('fn:') ? `both sides changed function ${c.slice(3)}`
+          : c.startsWith('class:') ? `both sides changed class ${c.slice(6)}`
+            : `both sides changed ${c.replace(/^\w+:/, '')}`).join('; ')
+  }
+  function icrMerge3(base, mine, theirs, relPath) {
+    const lm = merge3(base, mine, theirs)
+    if (!icrlib || !icrlib.supports(relPath)) return lm
+    let r
+    try { r = icrlib.structuralMerge(base, mine, theirs, { filename: relPath }) } catch (e) { return lm }
+    if (r.status === 'auto') {
+      const renamed = r.renames && r.renames.length
+      return { text: r.text, conflict: false, icr: renamed ? 'rename' : 'structural', icrWarning: renamed ? `auto-applied rename ${r.renames.join(', ')}` : undefined }
+    }
+    if (r.status === 'semantic-conflict') return Object.assign({}, lm, { icrWarning: describeConflicts(r.conflicts) })
+    return lm
+  }
   // Line-anchored detection of REAL conflict markers — NOT a substring scan, so
   // a file that merely documents the markers (e.g. a README) isn't flagged.
   function hasConflictMarkers(text) { return /^<<<<<<< /m.test(text) && /^>>>>>>> /m.test(text) }
   // Bring one file's disk copy and shared-doc copy into agreement via 3-way
   // merge against its last agreed base. Safe from either direction.
   const conflicted = new Set()
+  const icrWarned = new Map() // path -> last ICR semantic warning surfaced (dedupe)
   function reconcile(r, origin = 'local') {
     if (SKIP.has(r) || isIgnored(r)) return // never sync secrets/ignored/coordination files
     if (!canOpen(r)) return // out-of-scope OR unsafe path (traversal/control char) — never materialize it
@@ -917,9 +945,9 @@ function start(root, room, relay, linkToken) {
       const mineLines = new Set(disk.split('\n'))
       const integrated = theirsNew.every((l) => mineLines.has(l))
       if (integrated) { res = { text: disk, conflict: false } }
-      else { res = merge3(fork, disk, docText); reAdded = !res.conflict && res.text !== disk }
+      else { res = icrMerge3(fork, disk, docText, r); reAdded = !res.conflict && res.text !== disk }
     } else {
-      res = merge3(base, disk, docText)
+      res = icrMerge3(base, disk, docText, r)
     }
     // Snapshot the state JUST BEFORE this author's edit (local origin only — so each
     // change is recorded once, by its true author), then apply the merge.
@@ -944,8 +972,21 @@ function start(root, room, relay, linkToken) {
     } else if (reAdded) {
       logActivity(`protected ${r}: edit was based on an older version — re-added changes that arrived since`)
       try { say(`↺ ${r}: an edit was based on an older copy — kept the changes that landed in between (nothing lost).`) } catch { }
+    } else if (!hasMarkers && res.icr === 'rename') {
+      logActivity(`ICR merged ${r} (detected a rename and updated the call sites)`)
+    } else if (!hasMarkers && res.icr === 'structural') {
+      logActivity(`ICR merged ${r} structurally (both edits kept, syntax guaranteed)`)
     } else if (!hasMarkers) {
       logActivity(`merged ${r} (both edits kept)`)
+    }
+    // ICR semantic warning: text merged, but ICR saw a meaning-level problem a line merge
+    // can't (e.g. a dangling reference). Surface it so it isn't shipped silently.
+    if (res.icrWarning && icrWarned.get(r) !== res.icrWarning) {
+      icrWarned.set(r, res.icrWarning)
+      logActivity(`⚠ ICR flag in ${r} — ${res.icrWarning}`)
+      try { say(`⚠ ICR flag in ${r}: ${res.icrWarning}. It merged, but review — this is a break a plain merge can't see.`) } catch { }
+    } else if (!res.icrWarning && icrWarned.has(r)) {
+      icrWarned.delete(r)
     }
   }
   // AUTO-BOARD: a local wholesale rewrite is recorded for everyone — the agent

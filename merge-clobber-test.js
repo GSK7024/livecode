@@ -111,7 +111,9 @@ assert('both routes kept after resolve', read(B).includes('/login') && read(B).i
 console.log('\n# Control: a good agent that RE-READ before writing merges cleanly (no spurious conflict)')
 // B re-reads (sees both), then adds /logout building on the latest.
 const latest = read(B)
-const withLogout = latest.replace("'/signup': (req, res) => res.end('signed up'),", "'/signup': (req, res) => res.end('signed up'),\n  '/logout': (req, res) => res.end('bye'),")
+// Insert /logout right after the /signup line — match it regardless of an optional
+// trailing comma (ICR normalizes the last property's comma), so this stays robust.
+const withLogout = latest.replace(/( *'\/signup': \(req, res\) => res\.end\('signed up'\),?)/, "$1\n  '/logout': (req, res) => res.end('bye'),")
 write(B, withLogout)
 await sleep(3000)
 const ga = read(A), gb = read(B)

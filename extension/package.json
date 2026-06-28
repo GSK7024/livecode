@@ -1,8 +1,8 @@
 {
   "name": "hivecode",
-  "displayName": "Hivecode — multiplayer for AI coding agents",
-  "description": "Run humans and multiple AI agents on one live codebase, with folder-scoped permissions and approval gates. No git push/pull.",
-  "version": "0.8.1",
+  "displayName": "Hivecode — oversight & control for AI coding agents",
+  "description": "Watch, fence, approve, and roll back your AI coding agents. Live oversight, folder-scoped permissions, approval gates, and instant rollback for multi-agent coding. No git push/pull.",
+  "version": "0.9.0",
   "publisher": "hivecode",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -23,7 +23,11 @@
     "pair programming",
     "realtime",
     "multiplayer",
-    "mcp"
+    "mcp",
+    "governance",
+    "oversight",
+    "permissions",
+    "rollback"
   ],
   "galleryBanner": {
     "color": "#0a0c10",
@@ -159,6 +163,7 @@
     "publish:ovsx": "ovsx publish"
   },
   "dependencies": {
+    "acorn": "^8.17.0",
     "ignore": "^5.3.2",
     "ws": "^8.18.0",
     "y-websocket": "^2.0.4",

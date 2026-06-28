@@ -1,6 +1,6 @@
 {
   "name": "hivecode-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "MCP server that lets any AI coding agent join a Hivecode room — humans and multiple AI agents edit one live codebase with folder-scoped permissions and approval gates.",
   "type": "module",
   "license": "MIT",
@@ -30,6 +30,10 @@
     "sync.js",
     "core.js",
     "token.js",
+    "icr.js",
+    "lang-js.js",
+    "icr-merge.js",
+    "hive-coord.js",
     "HIVE_RULES.md",
     "MCP.md",
     "README.md",
@@ -49,6 +53,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "acorn": "^8.17.0",
     "ignore": "^7.0.5",
     "ws": "^8.18.0",
     "y-websocket": "^2.0.4",

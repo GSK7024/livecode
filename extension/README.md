@@ -1,32 +1,36 @@
-# Hivecode — governed multiplayer for AI coding
+# Hivecode — oversight & control for AI coding agents
 
-**Run a team of humans and AI agents on one live codebase — with folder-scoped
-permissions and approval gates, so an agent can never touch what it shouldn't.**
-No git push/pull. Edits sync in about a second.
+**You can't trust an AI agent blindly. Hivecode lets you watch it, fence it, gate
+it, and undo it.** Run AI agents on your codebase and stay in control — see every
+edit live, restrict each agent to the folders it's allowed in, approve the risky
+moves, and roll back any agent instantly. No git push/pull; edits sync in ~1s.
 
-> The moment you point more than one AI agent at a project, it gets messy: they
-> overwrite each other's files, duplicate the same work, and every agent can touch
-> every file — secrets, configs, infra included. Hivecode gives you a *shared live
-> room* with real access control.
+> Isolating each agent in a git worktree doesn't help you *trust* the output — it
+> just defers the merge. Hivecode adds the layer worktrees don't: real-time
+> oversight and control over what every agent does.
 
 ---
 
 ## Why Hivecode
 
+- 👀 **Live Control Room.** Watch every agent and every file it touches in real
+  time — from any browser or your phone. No more "what is it even doing?"
 - 🔐 **Folder-scoped access.** Invite an agent to `frontend/` only. It literally
   never receives the bytes for anything outside its scope — enforced by the relay,
   not by trust.
-- ✅ **Approval gates.** A human's request to *your* agent waits for your OK.
-  Agent-to-agent coordination flows automatically.
-- 👀 **Read-only roles.** Reviewers and watchers see everything, change nothing.
+- ✅ **Approval gates.** Risky work waits for your OK. Agent-to-agent coordination
+  flows automatically.
+- ⏮️ **Instant rollback.** Restore any file to an earlier point, or **revert
+  *everything* one agent did** in a click — undo a rogue agent without losing the
+  rest of the team's work.
+- 🎛️ **Mission control.** Pause, resume, or reassign any agent; it honors it
+  mid-task.
 - ✂️ **Instant revoke.** Cut someone's access mid-session; enforced server-side on
   every reconnect, and it survives a relay restart.
 - 🤖 **Agent-neutral.** Claude Code, Cursor, Windsurf, or your own bot over MCP.
   Hivecode is the glue, not another model.
 - ⚡ **Conflict-safe sync.** Yjs CRDTs: disjoint edits auto-merge; overlaps keep
   *both* versions — nobody's work is ever silently lost.
-- 🔁 **Rooms persist.** Close the IDE and come back — same room, invite links still
-  work. No re-inviting everyone.
 
 ---
 

@@ -1,10 +1,10 @@
 <h1>Hivecode</h1>
 
-**Multiplayer for your AI coding agents — with real permissions.**
+**Oversight and control for your AI coding agents.**
 
-Run humans and multiple AI agents on one live codebase. Folder-scoped access,
-approval gates, instant revoke. No git push/pull — edits sync in about a second.
-Open source.
+Run AI agents on your codebase and actually stay in control: **watch** every edit
+live, **fence** each agent to the folders it's allowed in, **approve** the risky
+moves, and **undo** any agent instantly. No git push/pull. Open source.
 
 [**Install for VS Code**](https://marketplace.visualstudio.com/items?itemName=hivecode.hivecode)
 · [**Website**](https://livecode-xoss.onrender.com)
@@ -16,16 +16,21 @@ Open source.
 
 ## Why
 
-The moment you point more than one AI agent at a project, it gets messy: they
-overwrite each other's files, rebuild the same feature twice, and every agent can
-touch every file — secrets, configs, infra included. Today people juggle git
-worktrees and pray at merge time.
+You can't trust an AI agent blindly. The faster it edits, the more you have to
+check — and the moment you run more than one, it gets worse: they touch files they
+shouldn't, overwrite each other, and you lose track of who changed what. Today's
+answer is to isolate each agent in a git worktree and pray at merge time — which
+doesn't help you *trust* the output, it just defers the mess.
 
-Hivecode is a shared **live room** where humans and agents edit one project
-together — but with real access control. You decide what each agent can reach, and
-the relay enforces it; an out-of-scope agent never even receives the bytes.
+Hivecode adds the missing layer: **oversight and control.**
 
-It's **agent-neutral**: Claude Code, Cursor, Windsurf, or your own bot over MCP.
+- **See everything** — a live Control Room (browser or phone) shows every agent and every file it touches, in real time.
+- **Fence them in** — folder-scoped access the relay enforces; an out-of-scope agent never even receives the code.
+- **Approve what matters** — gate risky work so nothing lands without your OK.
+- **Undo anything** — instant rollback: restore any file, or revert *everything* one agent did.
+
+It's **agent-neutral**: Claude Code, Cursor, Windsurf, or your own bot over MCP. No
+git push/pull — edits sync in about a second.
 
 ---
 
@@ -59,14 +64,21 @@ member, scoped to exactly the folders you invited it to.
 
 ## What you get
 
-**Governance**
+**Oversight & control** *(the point of the whole thing)*
+- **Live Control Room** — watch every agent and every file it touches in real time,
+  from any browser or your phone. No more "what is it even doing right now?"
 - **Folder-scoped access** — invite an agent to `frontend/` only; it never receives
-  anything else.
-- **Approval gates** — a human's request to *your* agent waits for your OK;
-  agent-to-agent coordination flows automatically.
-- **Read-only roles** — reviewers see everything, change nothing.
+  anything else (relay-enforced, not trust-based).
+- **Approval gates** — risky work waits for your OK; agent-to-agent coordination
+  flows automatically.
+- **Instant rollback** — restore any file to an earlier point, or **revert
+  *everything* one agent did** in a click. Undo a rogue agent without touching the
+  rest of the team's work.
+- **Mission control** — pause, resume, or reassign any agent; agents honor it
+  mid-task.
 - **Instant revoke** — cut access mid-session, enforced server-side on every
   reconnect (and it survives a relay restart).
+- **Read-only roles** — reviewers see everything, change nothing.
 
 **Coordination**
 - **Built-in chat**, a **shared task board** (assign / complete), and **live
@@ -74,8 +86,6 @@ member, scoped to exactly the folders you invited it to.
 - **Co-editing heads-up** before two people touch the same file.
 - **Never lose work** — overlapping edits keep both versions with conflict markers;
   a stale rewrite can't silently delete another's lines.
-- **Mission control** — pause, resume, or reassign any agent; agents honor it
-  mid-task.
 
 **Trust**
 - **Server-enforced auth** — signed tokens, algorithm-pinned, fail-closed.

@@ -21,7 +21,9 @@ import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 import { WebSocket } from 'ws'
 import ignore from 'ignore'
-import { applyDiff, merge3, summarizeChange, changedRange, hasConflictMarkers } from './core.js'
+import { applyDiff, summarizeChange, changedRange, hasConflictMarkers } from './core.js'
+import { icrMerge3 } from './icr-merge.js' // structure/intent-aware merge; falls back to line merge3
+import { makeCoordinator } from './hive-coord.js' // decentralized claim layer (collision PREVENTION)
 import { fileRoom, decodeUnsafe, scopeForRoom, pathAllowed, writeAllowed, isSafeRelPath } from './token.js'
 
 // Wire-format/protocol version. Bump when a change makes clients incompatible
@@ -70,6 +72,9 @@ asked to collaborate here, follow this.
 
 ## Work the loop
 - hive_read_chat() and hive_read_board() BEFORE editing — see what others are doing.
+- hive_claim("path/to/file") BEFORE you edit a file. If you get it, edit then
+  hive_release it. If you DON'T, someone else holds it — pick other work
+  (hive_claims() shows what's open). This is how agents avoid colliding.
 - hive_say("taking X: doing Y") to announce intent before you edit.
 - Edit ONLY inside the folders you were granted. Edits merge live; rewrites are logged.
 - Block on hive_wait(); when it returns approved work, do it, then hive_complete(id).
@@ -103,6 +108,15 @@ another's work. The sync layer enforces the hard parts automatically; you do the
 1. Read HIVE_CHAT.md — what is everyone doing right now.
 2. Read HIVE_BOARD.md — which files were just rewritten (and what was touched).
 3. If a file you plan to edit appears there, RE-READ it before changing it.
+
+## CLAIM before you edit (this is how the hive avoids collisions)
+- Before editing a file, CLAIM it: call the hive_claim tool with the file path
+  (and a short intent). This is the most important coordination step.
+  • If you GOT it: edit it, then call hive_release when you finish.
+  • If you could NOT get it: someone else holds it — do NOT edit it. Pick other
+    work; call hive_claims to see what's open.
+- Claims auto-expire, so a stalled agent never blocks the hive — but always
+  hive_release the moment you finish, so others can take it.
 
 ## While you work
 4. ANNOUNCE first: post to chat what you are taking, e.g.
@@ -186,6 +200,11 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   // holds the timeline (who changed what, when) — same exposure as the manifest,
   // which already lists every path. Lets a monitor (Control Room) show history.
   const historyMeta = doc.getMap('history')
+  // The Hive coordination layer: a stigmergic claim map — region(file) -> {by,intent,at,ttl}.
+  // Agents SENSE → FLOW → CLAIM before editing so they don't collide. No central controller;
+  // claims evaporate via TTL so a stalled agent never deadlocks the hive.
+  const claims = doc.getMap('claims')
+  const coordinator = makeCoordinator(claims, name, { ttl: 300000 }) // 5-min claim TTL
   // disableBc: do NOT sync peer-to-peer over BroadcastChannel. The relay must be
   // the ONLY path between clients — otherwise two clients on the same machine would
   // sync directly and bypass the relay's access control (auth, path scope, read-only).
@@ -283,6 +302,7 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
   }
 
   const conflicted = new Set() // files currently holding unresolved <<<<<<< markers
+  const icrWarned = new Map()  // relPath -> last ICR semantic warning announced (dedupe)
   function reconcile(relPath, origin = 'local') {
     if (SKIP.has(relPath) || isIgnored(relPath)) return // never sync secrets/ignored files
     if (!canOpen(relPath)) return // out-of-scope OR unsafe path (traversal/control char) — never materialize it
@@ -351,11 +371,11 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
       if (integrated) {
         res = { text: disk, conflict: false } // author built on the latest — trust it
       } else {
-        res = merge3(fork, disk, docText)
+        res = icrMerge3(fork, disk, docText, relPath)
         reAdded = !res.conflict && res.text !== disk // we restored remote lines a stale write had dropped
       }
     } else {
-      res = merge3(base, disk, docText) // incoming remote change merged into our working copy
+      res = icrMerge3(base, disk, docText, relPath) // incoming remote change merged into our working copy
     }
 
     // Snapshot the state JUST BEFORE this author's edit lands, attributed to them —
@@ -383,8 +403,23 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
     } else if (reAdded) {
       log(`[${name}] protected ${relPath}: your edit was based on an older version — re-added changes that arrived since (nobody's work lost)`)
       try { say(`↺ ${relPath}: ${name}'s edit was based on an older copy — kept the changes that landed in between (nothing lost).`) } catch { }
+    } else if (!hasMarkers && res.icr === 'rename') {
+      log(`[${name}] ICR merged ${relPath} (detected a rename and updated the call sites)`)
+    } else if (!hasMarkers && res.icr === 'structural') {
+      log(`[${name}] ICR merged ${relPath} structurally (both edits kept, syntax guaranteed)`)
     } else if (!hasMarkers) {
       log(`[${name}] merged ${relPath} (both edits kept)`)
+    }
+
+    // ICR semantic warning: the text merged, but ICR saw a meaning-level problem a line
+    // merge can't (e.g. a dangling reference). Surface it once per distinct warning so it
+    // isn't lost — this is exactly the class of bug ICR exists to catch.
+    if (res.icrWarning && icrWarned.get(relPath) !== res.icrWarning) {
+      icrWarned.set(relPath, res.icrWarning)
+      log(`[${name}] ⚠ ICR flag in ${relPath} — ${res.icrWarning}`)
+      try { say(`⚠ ICR flag in ${relPath}: ${res.icrWarning}. It merged, but review — this is a break a plain merge can't see.`) } catch { }
+    } else if (!res.icrWarning && icrWarned.has(relPath)) {
+      icrWarned.delete(relPath)
     }
   }
 
@@ -792,6 +827,11 @@ export function startSync({ relay = 'ws://localhost:1234', room = 'default', dir
     control,             // pause/resume an agent (mission control)
     isPaused,            // is a participant currently paused?
     controls,            // the live control map
+    // --- hive coordination: claim a region BEFORE editing (collision prevention) ---
+    claim: (region, intent) => coordinator.acquire(String(region), String(intent || 'edit')), // true iff you hold it
+    release: (region) => coordinator.release(String(region)),
+    senseClaim: (region) => coordinator.sense(String(region)), // the live claim on a region, or null
+    claimsBoard: () => coordinator.board(),                     // everything currently claimed
     // --- rollback ---
     listHistory,         // the restore-point timeline (newest first; filter by file/by)
     restore,             // restore a file to a restore point by id (reversible)
